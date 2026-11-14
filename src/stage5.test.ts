@@ -13,9 +13,12 @@ import {
   getGeminiCapBanner,
   getGeminiPlaybackMode,
   getGeminiUsageSummary,
+  isGeminiCallBlocked,
   loadRecordedRunEntries,
+  loadRecordedRunFromDisk,
   setGeminiPlaybackMode,
 } from './gemini/client';
+import { resolveTextPlaceholdersWithFallback } from './gemini/placeholders';
 import { executeActionThroughGateway } from './gateway/gateway';
 import { buildEndStatement } from './statement/statement';
 import { ActionDecision, AutonomyReaction, BuiltToolRecord, CardReaction } from './types/domain';
@@ -314,10 +317,13 @@ test('Part E Replay mode & fallback: default replay makes zero live calls, recor
   assert.equal(setGeminiPlaybackMode('replay'), 'replay');
   assert.equal(getGeminiCapBanner(), null);
 
-  // Even with a dummy key, replay mode must NEVER attempt live HTTP calls and must fall back cleanly
+  // Without an API key, unrecorded calls in replay ("Recorded, live when needed") fall back cleanly without stalling.
+  // With recorded entries loaded, replay needs no API key; with an API key, unrecorded calls are eligible to run live.
   const prevKey = process.env.GEMINI_API_KEY;
-  process.env.GEMINI_API_KEY = 'dummy-test-key-never-called';
+  process.env.GEMINI_API_KEY = '';
   try {
+    assert.equal(isGeminiCallBlocked('other'), 'No GEMINI_API_KEY configured');
+
     const sim = runSimulation(DEFAULT_SEED);
     const snap = {
       candidateId: 'situation:stock_running_out:knitwear',
@@ -341,6 +347,10 @@ test('Part E Replay mode & fallback: default replay makes zero live calls, recor
     assert.equal(inv.jobKey, 'investigate_routine');
     const usage = getGeminiUsageSummary();
     assert.equal(usage.liveCalls, 0);
+
+    process.env.GEMINI_API_KEY = 'dummy-test-key-never-called';
+    assert.equal(isGeminiCallBlocked('other'), null);
+    process.env.GEMINI_API_KEY = '';
 
     // Round-trip recorded run serialization
     const loadedCount = loadRecordedRunEntries([
@@ -375,6 +385,57 @@ test('Part E Replay mode & fallback: default replay makes zero live calls, recor
       builtTools: [],
     });
     assert.equal(directStmt.noticing.realTotalFact.value, 5);
+
+    // Fix 1: Placeholder resolver substitutes matching facts and replaces unresolved sentences cleanly
+    const fUnits = createFact('plan:best_sellers:units:2026-09-08', 'Transfer units', 2453, 'units', 'Test note.');
+    const resolvedGood = resolveTextPlaceholdersWithFallback(
+      'Transfer {{plan:best_sellers:units:2026-09-08}} from spare stores.',
+      { [fUnits.id]: fUnits },
+      'Move spare units safely.',
+    );
+    assert.equal(resolvedGood.usedFallback, false);
+    assert.equal(resolvedGood.text, 'Transfer 2,453 units from spare stores.');
+
+    const resolvedBad = resolveTextPlaceholdersWithFallback(
+      'Stock is low. Transfer {{unknown:missing_id}} now.',
+      { [fUnits.id]: fUnits },
+      'Move spare units safely.',
+    );
+    assert.equal(resolvedBad.usedFallback, true);
+    assert.ok(!resolvedBad.text.includes('{{') && !resolvedBad.text.includes('}}'));
+    assert.ok(resolvedBad.text.includes('Move spare units safely.'));
+
+    // Verify Sep 8 recorded Best-sellers resolves {{plan:best_sellers:units:2026-09-08}} to 2,453 units cleanly
+    clearGeminiMemoryCache();
+    clearTimelineSnapshotCache();
+    setGeminiPlaybackMode('replay');
+    const diskCount = loadRecordedRunFromDisk();
+    assert.ok(diskCount > 100, 'recorded_run.json must load entries');
+    const sep8 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: sim.liveDates.indexOf('2026-09-08'),
+      decisions: [],
+      reactions: [],
+      investigateTargetDay: true,
+    });
+    const bsCard = sep8.dayState.raised.find((r) => r.candidateId === 'situation:stock_running_out:best_sellers');
+    assert.ok(bsCard?.investigation, 'Sep 8 Best-sellers investigation must be present');
+    const strings: string[] = [];
+    const walk = (v: unknown) => {
+      if (typeof v === 'string') strings.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+    };
+    walk(bsCard.investigation);
+    assert.ok(
+      strings.every((s) => !s.includes('{{') && !s.includes('}}')),
+      'Sep 8 investigation string fields must have zero raw placeholder braces',
+    );
+    assert.ok(
+      bsCard.investigation.options.some((o) => o.description.includes('2,453 units') || o.label.includes('2,453 units')),
+      'Sep 8 option 1 must fill 2,453 units from plan fact',
+    );
+    assert.equal(getGeminiUsageSummary().liveCalls, 0);
   } finally {
     if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
     else delete process.env.GEMINI_API_KEY;

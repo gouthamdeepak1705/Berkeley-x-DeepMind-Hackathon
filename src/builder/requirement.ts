@@ -10,7 +10,10 @@ import {
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
-import { validateAndResolvePlaceholders } from '../gemini/placeholders';
+import {
+  sanitizeSegmentsWithFallback,
+  validateAndResolvePlaceholders,
+} from '../gemini/placeholders';
 import { GEMINI_SETTINGS } from '../gemini/settings';
 import { BuilderRequirement, Fact, RaisedItem, TextSegment } from '../types/domain';
 import { computeExpectedFlaggedStats } from './builder';
@@ -279,22 +282,9 @@ export async function generateRefundDeskRequirement(params: {
         const vVal = validateAndResolvePlaceholders(parsed.verification_template, factsById);
 
         if (pVal.ok && uVal.ok && sVal.ok && aVal.ok && vVal.ok) {
-          return {
+          const fallbackReq = buildFallbackRequirement({
             situationId: situation.candidateId,
-            title: 'Refund exceptions desk',
-            generatedOn: date,
-            purpose: pVal.segments,
-            users: uVal.segments,
-            shows: sVal.segments,
-            actions: aVal.segments,
-            verification: vVal.segments,
-            plainSummary: {
-              purpose: segmentsToText(pVal.segments),
-              users: segmentsToText(uVal.segments),
-              shows: segmentsToText(sVal.segments),
-              actions: segmentsToText(aVal.segments),
-              verification: segmentsToText(vVal.segments),
-            },
+            date,
             factsById,
             model: res.model,
             mode: res.mode,
@@ -302,6 +292,36 @@ export async function generateRefundDeskRequirement(params: {
             inputTokens: res.inputTokens,
             outputTokens: res.outputTokens,
             usedFallbackWording: false,
+          });
+          const cP = sanitizeSegmentsWithFallback(pVal.segments, factsById, fallbackReq.purpose);
+          const cU = sanitizeSegmentsWithFallback(uVal.segments, factsById, fallbackReq.users);
+          const cS = sanitizeSegmentsWithFallback(sVal.segments, factsById, fallbackReq.shows);
+          const cA = sanitizeSegmentsWithFallback(aVal.segments, factsById, fallbackReq.actions);
+          const cV = sanitizeSegmentsWithFallback(vVal.segments, factsById, fallbackReq.verification);
+          return {
+            situationId: situation.candidateId,
+            title: 'Refund exceptions desk',
+            generatedOn: date,
+            purpose: cP.segments,
+            users: cU.segments,
+            shows: cS.segments,
+            actions: cA.segments,
+            verification: cV.segments,
+            plainSummary: {
+              purpose: segmentsToText(cP.segments),
+              users: segmentsToText(cU.segments),
+              shows: segmentsToText(cS.segments),
+              actions: segmentsToText(cA.segments),
+              verification: segmentsToText(cV.segments),
+            },
+            factsById,
+            model: res.model,
+            mode: res.mode,
+            latencyMs: res.latencyMs,
+            inputTokens: res.inputTokens,
+            outputTokens: res.outputTokens,
+            usedFallbackWording:
+              cP.usedFallback || cU.usedFallback || cS.usedFallback || cA.usedFallback || cV.usedFallback,
           };
         }
 

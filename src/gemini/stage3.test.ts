@@ -349,10 +349,14 @@ test('Dismiss with reason permanently hides situation and records reaction', asy
       reactions,
       investigateTargetDay: true,
     });
+    const bsAfterDismiss = oct5Res.dayState.raised.find(
+      (r) => r.candidateId === 'situation:stock_running_out:best_sellers',
+    );
     assert.ok(
-      !oct5Res.dayState.raised.some(
-        (r) => r.candidateId === 'situation:stock_running_out:best_sellers',
+      !bsAfterDismiss?.stores?.some(
+        (s) => s.storeId === 'union_square' || s.storeId === 'palo_alto',
       ),
+      'Stores on the dismissed Sep 8 card must remain permanently hidden',
     );
     assert.equal(oct5Res.dayState.reactions?.length, 1);
     assert.equal(oct5Res.dayState.reactions?.[0].reason, 'not_mine');

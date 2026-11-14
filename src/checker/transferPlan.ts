@@ -9,10 +9,19 @@ export function buildTransferPlanForGroup(params: {
   date: string;
   groupId: 'best_sellers' | 'knitwear';
   controlStores?: Set<string>;
+  dismissedStores?: Set<string>;
   explicitReceivers?: StoreId[];
   disableHoldout?: boolean;
 }): { plan: TransferPlan; facts: Fact[] } {
-  const { sim, date, groupId, controlStores = new Set(), explicitReceivers, disableHoldout } = params;
+  const {
+    sim,
+    date,
+    groupId,
+    controlStores = new Set(),
+    dismissedStores,
+    explicitReceivers,
+    disableHoldout,
+  } = params;
   const grpName = groupId === 'best_sellers' ? 'Best-sellers' : 'Knitwear';
   const avgPrice = groupId === 'best_sellers' ? 120 : 90;
   const recs = sim.storeRecordsByDate[date];
@@ -43,6 +52,7 @@ export function buildTransferPlanForGroup(params: {
     receiverIds = STORES.filter((st) => {
       if (!recs[st.id]?.isOpen) return false;
       if (controlStores.has(st.id)) return false;
+      if (dismissedStores?.has(st.id)) return false;
       if (sim.isDeliveryDueWithinDays(st.id, groupId, date, 14)) return false;
       const gs = recs[st.id].groups[groupId];
       if (gs.weeksOfCover === null) return false;

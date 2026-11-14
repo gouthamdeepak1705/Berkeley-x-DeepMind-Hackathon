@@ -1,5 +1,6 @@
 import { Play, SlidersHorizontal } from 'lucide-react';
 import { DayOneBrief, Fact, TextSegment } from '../types/domain';
+import { stripUnresolvedBraces } from '../gemini/placeholders';
 import { FactValue } from './FactValue';
 
 interface DayOneScreenProps {
@@ -14,7 +15,7 @@ interface DayOneScreenProps {
 function renderSegments(segments: TextSegment[], onInspectFact: (fact: Fact) => void) {
   return segments.map((seg, idx) =>
     seg.type === 'text' ? (
-      <span key={`t-${idx}`}>{seg.text}</span>
+      <span key={`t-${idx}`}>{stripUnresolvedBraces(seg.text)}</span>
     ) : (
       <FactValue key={`${seg.fact.id}-${idx}`} fact={seg.fact} onInspect={onInspectFact} />
     ),

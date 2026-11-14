@@ -44,7 +44,7 @@ export function ClockHeader({
             <p className="text-xs font-medium text-[#78716C]">Linden &amp; Rye</p>
             {isWatchDemo && (
               <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#EEF2FF] text-[#312E81] border border-[#C7D2FE]">
-                Watching scripted run
+                Watch it run: the demo is choosing for you
               </span>
             )}
           </div>

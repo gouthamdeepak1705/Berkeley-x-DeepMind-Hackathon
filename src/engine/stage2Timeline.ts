@@ -54,6 +54,7 @@ export interface Stage2StepResponse {
   sim: SimulationRun;
   pendingSituation?: RaisedItem;
   decisions: ActionDecision[];
+  dismissedStockStores?: Map<string, Set<StoreId>>;
 }
 
 interface InternalSituation {
@@ -362,6 +363,7 @@ function buildRaisedItemSnapshot(
   sit: InternalSituation,
   date: string,
   sim: SimulationRun,
+  dismissedStockStores?: Map<string, Set<StoreId>>,
 ): RaisedItem {
   const storeList = Array.from(sit.stores.values()).map((st) => ({
     storeId: st.storeId,
@@ -461,10 +463,12 @@ function buildRaisedItemSnapshot(
     (sit.groupId === 'best_sellers' || sit.groupId === 'knitwear') &&
     (!transferPlan || date > sit.firstDetectedOn)
   ) {
+    const disSet = dismissedStockStores?.get(sit.groupId);
     transferPlan = buildTransferPlanForGroup({
       sim,
       date,
       groupId: sit.groupId,
+      dismissedStores: disSet && disSet.size > 0 ? disSet : undefined,
     }).plan;
   }
 
@@ -504,6 +508,7 @@ interface TimelineLoopSnapshot {
   dismissedSituations: Set<string>;
   approvedSituations: Set<string>;
   approvedStockStores: Map<string, Set<StoreId>>;
+  dismissedStockStores: Map<string, Set<StoreId>>;
   handledRolloutIds: Set<string>;
   openStockByGroup: Map<'best_sellers' | 'knitwear', Map<StoreId, string>>;
   activeEpisodeSituation: Map<string, string>;
@@ -571,6 +576,10 @@ function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
   for (const [k, s] of snap.approvedStockStores.entries()) {
     approvedStockStores.set(k, new Set(s));
   }
+  const dismissedStockStores = new Map<string, Set<StoreId>>();
+  for (const [k, s] of snap.dismissedStockStores.entries()) {
+    dismissedStockStores.set(k, new Set(s));
+  }
   const openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
   for (const [k, m] of snap.openStockByGroup.entries()) {
     openStockByGroup.set(k, new Map(m));
@@ -590,6 +599,7 @@ function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
     dismissedSituations: new Set(snap.dismissedSituations),
     approvedSituations: new Set(snap.approvedSituations),
     approvedStockStores,
+    dismissedStockStores,
     handledRolloutIds: new Set(snap.handledRolloutIds),
     openStockByGroup,
     activeEpisodeSituation: new Map(snap.activeEpisodeSituation),
@@ -751,6 +761,7 @@ export async function evaluateStage2UpToDay(params: {
   let dismissedSituations = new Set<string>();
   let approvedSituations = new Set<string>();
   let approvedStockStores = new Map<string, Set<StoreId>>();
+  let dismissedStockStores = new Map<string, Set<StoreId>>();
   let handledRolloutIds = new Set<string>();
   let openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
   let activeEpisodeSituation = new Map<string, string>();
@@ -786,6 +797,7 @@ export async function evaluateStage2UpToDay(params: {
     dismissedSituations = cloned.dismissedSituations;
     approvedSituations = cloned.approvedSituations;
     approvedStockStores = cloned.approvedStockStores;
+    dismissedStockStores = cloned.dismissedStockStores;
     handledRolloutIds = cloned.handledRolloutIds;
     openStockByGroup = cloned.openStockByGroup;
     activeEpisodeSituation = cloned.activeEpisodeSituation;
@@ -983,6 +995,12 @@ export async function evaluateStage2UpToDay(params: {
         cand.storeId &&
         (cand.groupId === 'best_sellers' || cand.groupId === 'knitwear')
       ) {
+        if (
+          approvedStockStores.get(cand.groupId)?.has(cand.storeId) ||
+          dismissedStockStores.get(cand.groupId)?.has(cand.storeId)
+        ) {
+          continue;
+        }
         const sitId = `situation:stock_running_out:${cand.groupId}`;
         const existingSit = openSituations.get(sitId);
         if (existingSit) {
@@ -1040,9 +1058,10 @@ export async function evaluateStage2UpToDay(params: {
       const key = `situation:stock_running_out:${grpId}`;
       if (dismissedSituations.has(key) || approvedSituations.has(key)) continue;
       const appSet = approvedStockStores.get(grpId);
-      const waveMembers = appSet
-        ? members.filter((m) => !m.storeId || !appSet.has(m.storeId))
-        : members;
+      const disSet = dismissedStockStores.get(grpId);
+      const waveMembers = members.filter(
+        (m) => !m.storeId || (!appSet?.has(m.storeId) && !disSet?.has(m.storeId)),
+      );
       if (waveMembers.length === 0) continue;
 
       const weekKey = getIsoWeekKey(date);
@@ -1118,7 +1137,7 @@ export async function evaluateStage2UpToDay(params: {
 
     if (subjectsToAsk.length > 0) {
       const openListForBrief = Array.from(openSituations.values()).map((s) =>
-        buildRaisedItemSnapshot(s, date, sim),
+        buildRaisedItemSnapshot(s, date, sim, dismissedStockStores),
       );
       const letGoSummaries = Array.from(letGoMap.values()).map((lg) => lg.reason);
 
@@ -1534,12 +1553,18 @@ export async function evaluateStage2UpToDay(params: {
             newSit.detectorKind === 'stock_running_out' &&
             newSit.stores.size <= 1)
         ) {
-          const snap = buildRaisedItemSnapshot(newSit, date, sim);
+          const snap = buildRaisedItemSnapshot(newSit, date, sim, dismissedStockStores);
+          const groupDisSet =
+            newSit.detectorKind === 'stock_running_out' &&
+            (newSit.groupId === 'best_sellers' || newSit.groupId === 'knitwear')
+              ? dismissedStockStores.get(newSit.groupId)
+              : undefined;
           const inv = await runSituationInvestigation({
             situation: snap,
             sim,
             date,
             controlStores: effectiveControlStores,
+            dismissedStores: groupDisSet && groupDisSet.size > 0 ? groupDisSet : undefined,
           });
           completedInvestigations.set(invLookupKey, inv);
           completedInvestigations.set(newSit.id, inv);
@@ -1572,7 +1597,7 @@ export async function evaluateStage2UpToDay(params: {
             tryAutonomousExecution(inv);
           }
         } else {
-          pendingSituation = buildRaisedItemSnapshot(newSit, date, sim);
+          pendingSituation = buildRaisedItemSnapshot(newSit, date, sim, dismissedStockStores);
         }
       }
 
@@ -1771,7 +1796,22 @@ export async function evaluateStage2UpToDay(params: {
           outcome: 'raised',
         });
       } else if (r.reaction === 'dismiss') {
-        dismissedSituations.add(r.candidateId);
+        if (r.candidateId.startsWith('situation:stock_running_out:')) {
+          const grpId = r.candidateId.split(':')[2] as 'best_sellers' | 'knitwear';
+          const openSit = openSituations.get(r.candidateId);
+          let disSet = dismissedStockStores.get(grpId);
+          if (!disSet) {
+            disSet = new Set();
+            dismissedStockStores.set(grpId, disSet);
+          }
+          if (openSit) {
+            for (const sid of openSit.stores.keys()) disSet.add(sid);
+          }
+          openStockByGroup.delete(grpId);
+          watchedMap.delete(r.candidateId);
+        } else {
+          dismissedSituations.add(r.candidateId);
+        }
         deferredSituations.delete(r.candidateId);
         openSituations.delete(r.candidateId);
         allTrace.push({
@@ -1813,6 +1853,7 @@ export async function evaluateStage2UpToDay(params: {
         dismissedSituations,
         approvedSituations,
         approvedStockStores,
+        dismissedStockStores,
         handledRolloutIds,
         openStockByGroup,
         activeEpisodeSituation,
@@ -1863,7 +1904,9 @@ export async function evaluateStage2UpToDay(params: {
   );
 
   const raisedSnapshot: RaisedItem[] = [
-    ...visibleOpenSituations.map((sit) => buildRaisedItemSnapshot(sit, targetDate, sim)),
+    ...visibleOpenSituations.map((sit) =>
+      buildRaisedItemSnapshot(sit, targetDate, sim, dismissedStockStores),
+    ),
     ...visibleRolloutCards,
   ].sort((a, b) => {
     const stakeB = (b.todayStakePerWeek ?? b.stakePerWeek).value;
@@ -2008,5 +2051,6 @@ export async function evaluateStage2UpToDay(params: {
     sim,
     pendingSituation,
     decisions,
+    dismissedStockStores,
   };
 }

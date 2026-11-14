@@ -308,7 +308,7 @@ export function buildEndStatement(params: {
     'Median decision time (ms)',
     medDecisionMs,
     'count',
-    'Median latency in milliseconds across daily Gemini Decision batches (original live latency even in Replay).',
+    'Median latency in milliseconds across daily Gemini Decision batches (original live latency even when replayed).',
   );
 
   // 3. Wrong, unproven, disagreements, fallbacks
@@ -441,11 +441,11 @@ export function buildEndStatement(params: {
         'Live session API cost (USD)',
         Math.round(estUsd * 100) / 100,
         'USD',
-        `Exact estimated USD cost from live session token usage ($${estUsd.toFixed(4)} exact); $0.00 during Replay mode.`,
+        `Exact estimated USD cost from live session token usage ($${estUsd.toFixed(4)} exact); $0.00 when all calls hit the recorded run.`,
       ),
       liveModeCostNote:
         estUsd === 0
-          ? 'Session ran on Replay or cached responses ($0.00 spent in this browser session).'
+          ? 'Session ran on pre-recorded Gemini responses ($0.00 spent in this browser session).'
           : `Estimated from actual Gemini token counts in this session ($${estUsd.toFixed(4)}).`,
     },
     built: {

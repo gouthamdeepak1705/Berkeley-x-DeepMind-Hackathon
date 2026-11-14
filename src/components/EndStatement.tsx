@@ -1,5 +1,6 @@
 import { Check, FileText, Wrench } from 'lucide-react';
 import { formatShortDate } from '../engine/calendar';
+import { stripUnresolvedBraces } from '../gemini/placeholders';
 import { EndStatementData, Fact } from '../types/domain';
 import { FactValue } from './FactValue';
 
@@ -150,7 +151,7 @@ export function EndStatement({ statement, onInspectFact }: EndStatementProps) {
         </div>
         <ul className="space-y-1 text-xs text-[#57534E] list-disc pl-4">
           {wrongOrUnproven.notes.map((n, idx) => (
-            <li key={`note-${idx}`}>{n}</li>
+            <li key={`note-${idx}`}>{stripUnresolvedBraces(n)}</li>
           ))}
         </ul>
       </div>

@@ -455,7 +455,7 @@ export default function App() {
     setSpeed(2);
     setStarted(true);
     setIsPlaying(true);
-    setDemoCaption('Starting scripted run in Replay mode from 1 August 2026.');
+    setDemoCaption('Starting Watch it run from 1 August 2026.');
   };
 
   const handleStartDrive = async () => {
@@ -1164,7 +1164,7 @@ export default function App() {
         >
           {typeof capReachedBanner === 'string'
             ? capReachedBanner
-            : 'Daily Gemini limit reached — switched to Replay for the rest of this session.'}
+            : 'Daily Gemini limit reached — using code backup rules for unrecorded calls this session.'}
         </div>
       )}
 
@@ -1194,7 +1194,7 @@ export default function App() {
             </p>
             {demoCaption && (
               <p data-testid="demo-caption" className="text-xs text-[#57534E] leading-snug">
-                {demoCaption}
+                {demoCaption.replace(/\{\{[^}]*\}\}/g, '').replace(/\{\{|\}\}/g, '')}
               </p>
             )}
           </div>

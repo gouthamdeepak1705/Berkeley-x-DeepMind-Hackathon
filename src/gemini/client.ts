@@ -173,6 +173,8 @@ let geminiPlaybackMode: GeminiPlaybackMode = 'replay';
 let capBannerMessage: string | null = null;
 
 const responseCache = new Map<string, unknown>();
+const prerecordedKeys = new Set<string>();
+const liveSessionKeys = new Set<string>();
 const recordedEntries = new Map<string, RecordedRunEntry>();
 const unavailableModels = new Map<string, string>();
 const callRecords: GeminiCallRecord[] = [];
@@ -188,7 +190,7 @@ export function getGeminiPlaybackMode(): GeminiPlaybackMode {
 export function setGeminiPlaybackMode(mode: GeminiPlaybackMode): GeminiPlaybackMode {
   if (mode === 'live' && (isCapReached('decision') || isCapReached('other'))) {
     geminiPlaybackMode = 'replay';
-    capBannerMessage = 'Daily Gemini call limit reached — locked to Replay for this session.';
+    capBannerMessage = 'Daily Gemini call limit reached — switched to backup rules for unrecorded calls this session.';
     return geminiPlaybackMode;
   }
   geminiPlaybackMode = mode;
@@ -216,6 +218,7 @@ export function loadRecordedRunEntries(entries: RecordedRunEntry[]): number {
   for (const e of entries) {
     if (!e || !e.cacheKey || !e.data) continue;
     recordedEntries.set(e.cacheKey, e);
+    prerecordedKeys.add(e.cacheKey);
     responseCache.set(e.cacheKey, e.data);
     loaded += 1;
   }
@@ -283,6 +286,8 @@ export function getGeminiClient(): GoogleGenAI | null {
 
 export function clearGeminiMemoryCache(): void {
   responseCache.clear();
+  prerecordedKeys.clear();
+  liveSessionKeys.clear();
   recordedEntries.clear();
   unavailableModels.clear();
   callRecords.length = 0;
@@ -308,9 +313,13 @@ export function isGeminiCallBlocked(bucket: 'decision' | 'other'): string | null
     if (recordedEntries.size > 0) {
       return null;
     }
-    return !getApiKey()
-      ? 'No GEMINI_API_KEY configured'
-      : 'Replay mode active with empty recorded cache';
+    if (!getApiKey()) {
+      return 'No GEMINI_API_KEY configured';
+    }
+    if (isCapReached(bucket)) {
+      return 'Daily cap reached';
+    }
+    return null;
   }
   if (!getApiKey()) {
     return 'No GEMINI_API_KEY configured';
@@ -466,13 +475,19 @@ export async function callDecisionsRaw(params: {
     questions: params.questions,
   });
 
-  if (!params.bypassCache && responseCache.has(cacheKey)) {
+  const canUseCache =
+    !params.bypassCache &&
+    responseCache.has(cacheKey) &&
+    (geminiPlaybackMode === 'replay' || liveSessionKeys.has(cacheKey));
+
+  if (canUseCache) {
     const cached = responseCache.get(cacheKey) as {
       payload: DecisionResponsePayload;
       originalLatencyMs: number;
     };
     const inputTokens = cached.payload.usage?.total_input_tokens ?? 0;
     const outputTokens = cached.payload.usage?.total_output_tokens ?? 0;
+    const replayOrLive = liveSessionKeys.has(cacheKey) && !prerecordedKeys.has(cacheKey) ? 'live' : 'replayed';
     recordGeminiCall({
       feature: params.feature,
       job: 'watcher',
@@ -480,19 +495,15 @@ export async function callDecisionsRaw(params: {
       latencyMs: cached.originalLatencyMs,
       inputTokens,
       outputTokens,
-      mode: 'replayed',
+      mode: replayOrLive,
     });
     return {
       payload: cached.payload,
-      mode: 'replayed',
+      mode: replayOrLive,
       latencyMs: cached.originalLatencyMs,
       inputTokens,
       outputTokens,
     };
-  }
-
-  if (geminiPlaybackMode === 'replay' && !params.allowLiveInReplay) {
-    throw new Error('Replay mode active: no recorded Gemini response for this request.');
   }
 
   const apiKey = getApiKey();
@@ -502,7 +513,7 @@ export async function callDecisionsRaw(params: {
   }
   if (isCapReached('decision')) {
     geminiPlaybackMode = 'replay';
-    capBannerMessage = 'Daily Gemini call limit reached — switched to Replay for this session.';
+    capBannerMessage = 'Daily Gemini call limit reached — using code backup rules for unrecorded calls this session.';
     throw new Error(`Daily uncached call cap (${GEMINI_SETTINGS.dailyCaps.decision}) reached for decision model.`);
   }
 
@@ -587,6 +598,7 @@ export async function callDecisionsRaw(params: {
         originalLatencyMs: latencyMs,
       };
       responseCache.set(cacheKey, cacheData);
+      liveSessionKeys.add(cacheKey);
       recordedEntries.set(cacheKey, {
         cacheKey,
         kind: 'decisions',
@@ -659,8 +671,14 @@ export async function callInteractionRaw(params: {
   };
   const cacheKey = hashRequest('interactions', params.model, cachePayload);
 
-  if (!params.bypassCache && responseCache.has(cacheKey)) {
+  const canUseCache =
+    !params.bypassCache &&
+    responseCache.has(cacheKey) &&
+    (geminiPlaybackMode === 'replay' || liveSessionKeys.has(cacheKey));
+
+  if (canUseCache) {
     const cached = responseCache.get(cacheKey) as Omit<InteractionCallResult, 'mode'>;
+    const replayOrLive = liveSessionKeys.has(cacheKey) && !prerecordedKeys.has(cacheKey) ? 'live' : 'replayed';
     recordGeminiCall({
       feature: params.feature,
       job: params.job,
@@ -668,16 +686,12 @@ export async function callInteractionRaw(params: {
       latencyMs: cached.latencyMs,
       inputTokens: cached.inputTokens,
       outputTokens: cached.outputTokens,
-      mode: 'replayed',
+      mode: replayOrLive,
     });
     return {
       ...cached,
-      mode: 'replayed',
+      mode: replayOrLive,
     };
-  }
-
-  if (geminiPlaybackMode === 'replay' && !params.allowLiveInReplay) {
-    throw new Error('Replay mode active: no recorded Gemini response for this request.');
   }
 
   const client = getGeminiClient();
@@ -687,7 +701,7 @@ export async function callInteractionRaw(params: {
   const bucket = GEMINI_SETTINGS.jobs[params.job].capBucket;
   if (isCapReached(bucket)) {
     geminiPlaybackMode = 'replay';
-    capBannerMessage = 'Daily Gemini call limit reached — switched to Replay for this session.';
+    capBannerMessage = 'Daily Gemini call limit reached — using code backup rules for unrecorded calls this session.';
     throw new Error(
       `Daily uncached call cap (${GEMINI_SETTINGS.dailyCaps[bucket]}) reached for ${bucket} models.`,
     );
@@ -792,6 +806,7 @@ export async function callInteractionRaw(params: {
         steps: result.steps,
       };
       responseCache.set(cacheKey, cacheData);
+      liveSessionKeys.add(cacheKey);
       recordedEntries.set(cacheKey, {
         cacheKey,
         kind: 'interactions',

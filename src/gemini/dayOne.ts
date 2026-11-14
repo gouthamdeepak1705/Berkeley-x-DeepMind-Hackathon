@@ -1,7 +1,10 @@
 import { createFact } from '../engine/facts';
 import { DayOneBrief, Fact, TextSegment } from '../types/domain';
 import { callInteractionRaw, isGeminiCallBlocked } from './client';
-import { validateAndResolvePlaceholders } from './placeholders';
+import {
+  sanitizeSegmentsWithFallback,
+  validateAndResolvePlaceholders,
+} from './placeholders';
 import { GEMINI_SETTINGS } from './settings';
 
 function buildCodeFallbackParagraphs(brief: DayOneBrief): TextSegment[][] {
@@ -144,9 +147,13 @@ export async function generateDayOneBriefWithGemini(baseBrief: DayOneBrief): Pro
         }
 
         if (valid) {
+          const fallbackParagraphs = buildCodeFallbackParagraphs(baseBrief);
+          const sanitizedParagraphs = resolved.map((segs, pIdx) =>
+            sanitizeSegmentsWithFallback(segs, factMap, fallbackParagraphs[pIdx]).segments,
+          );
           return {
             ...baseBrief,
-            narrativeSegments: resolved,
+            narrativeSegments: sanitizedParagraphs,
             narrativeMeta: {
               model: res.model,
               mode: res.mode,

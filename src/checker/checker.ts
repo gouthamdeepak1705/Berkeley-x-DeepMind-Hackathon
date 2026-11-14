@@ -10,7 +10,11 @@ import {
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
-import { validateAndResolvePlaceholders } from '../gemini/placeholders';
+import {
+  resolveTextPlaceholdersWithFallback,
+  sanitizeSegmentsWithFallback,
+  validateAndResolvePlaceholders,
+} from '../gemini/placeholders';
 import { GEMINI_SETTINGS, GeminiJobKey } from '../gemini/settings';
 import {
   Fact,
@@ -125,6 +129,7 @@ function selectInvestigationJob(
   sim: SimulationRun,
   date: string,
   controlStores?: Set<string>,
+  dismissedStores?: Set<string>,
 ): 'investigate_large' | 'investigate_routine' {
   if (situation.detectorKind === 'stock_running_out' && (!situation.stores || situation.stores.length <= 1)) {
     const grpId = situation.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
@@ -133,6 +138,7 @@ function selectInvestigationJob(
       date,
       groupId: grpId,
       controlStores,
+      dismissedStores,
     });
     if (
       plan.receiverStoreIds.length <= 1 &&
@@ -544,11 +550,20 @@ export async function runSituationInvestigation(params: {
   sim: SimulationRun;
   date: string;
   controlStores?: Set<string>;
+  dismissedStores?: Set<string>;
   bypassCache?: boolean;
   onEvent?: (ev: InvestigationStreamEvent) => void;
 }): Promise<InvestigationResult> {
-  const { situation, sim, date, controlStores = new Set(), bypassCache = false, onEvent } = params;
-  const jobKey = selectInvestigationJob(situation, sim, date, controlStores);
+  const {
+    situation,
+    sim,
+    date,
+    controlStores = new Set(),
+    dismissedStores,
+    bypassCache = false,
+    onEvent,
+  } = params;
+  const jobKey = selectInvestigationJob(situation, sim, date, controlStores, dismissedStores);
   const cfg = GEMINI_SETTINGS.jobs[jobKey];
   const factsById = seedFactsFromSituation(situation);
   const startAll = Date.now();
@@ -565,6 +580,7 @@ export async function runSituationInvestigation(params: {
           date,
           groupId: situation.groupId === 'knitwear' ? 'knitwear' : 'best_sellers',
           controlStores,
+          dismissedStores,
         })
       : null;
   if (transferPlanResult) {
@@ -861,16 +877,74 @@ export async function runSituationInvestigation(params: {
         return codeFallback;
       }
 
+      // Build code-wording sentences strictly for unresolved placeholder safety fallback
+      const codeFallbackWording = buildCodeFallbackInvestigation(
+        situation,
+        sim,
+        date,
+        localFacts,
+        toolTrace,
+        model,
+        finalMode,
+        totalLatency,
+        false,
+      );
+
+      let anySentenceFallback = false;
+      const cleanFinding = sanitizeSegmentsWithFallback(
+        findingSegments,
+        localFacts,
+        codeFallbackWording.findingSegments,
+      );
+      const cleanCause = sanitizeSegmentsWithFallback(
+        causeSegments,
+        localFacts,
+        codeFallbackWording.causeSegments,
+      );
+      const cleanProposal = sanitizeSegmentsWithFallback(
+        proposalSegments,
+        localFacts,
+        codeFallbackWording.proposalSegments,
+      );
+      if (cleanFinding.usedFallback || cleanCause.usedFallback || cleanProposal.usedFallback) {
+        anySentenceFallback = true;
+      }
+
       // Build plain English Ruled Out sentences from gathered computed facts
       const ruledOut: InvestigationRuledOut[] = buildRuledOutSentences(localFacts);
 
-      const options: InvestigationOption[] = parsedPayload.options.map((opt) => ({
-        id: opt.id,
-        label: opt.label,
-        isDoNothing: opt.is_do_nothing,
-        description: opt.description,
-        weeklyEffectFact: localFacts[opt.weekly_effect_fact_id],
-      }));
+      const fallbackActionOpt =
+        codeFallbackWording.options.find((o) => !o.isDoNothing) ?? codeFallbackWording.options[0];
+      const fallbackDoNothingOpt =
+        codeFallbackWording.options.find((o) => o.isDoNothing) ?? codeFallbackWording.options[0];
+
+      const options: InvestigationOption[] = parsedPayload.options.map((opt) => {
+        const refOpt = opt.is_do_nothing ? fallbackDoNothingOpt : fallbackActionOpt;
+        const defaultDesc =
+          !opt.is_do_nothing && transferPlanResult?.plan
+            ? `Move ${transferPlanResult.plan.totalUnitsFact.formatted} from stores with stock to spare while keeping safety stock.`
+            : refOpt?.description ?? 'Carry out the recommended operational action.';
+        const cleanLabel = resolveTextPlaceholdersWithFallback(
+          opt.label,
+          localFacts,
+          refOpt?.label ?? (opt.is_do_nothing ? 'Do nothing' : 'Take recommended action'),
+        );
+        const cleanDesc = resolveTextPlaceholdersWithFallback(
+          opt.description,
+          localFacts,
+          defaultDesc,
+        );
+        if (cleanLabel.usedFallback || cleanDesc.usedFallback) {
+          anySentenceFallback = true;
+        }
+        return {
+          id: opt.id,
+          label: cleanLabel.text,
+          isDoNothing: opt.is_do_nothing,
+          description: cleanDesc.text,
+          weeklyEffectFact: localFacts[opt.weekly_effect_fact_id],
+        };
+      });
       if (!options.some((o) => o.isDoNothing)) {
         const fallbackDn = createFact(
           `checker:dn:${situation.candidateId}:${date}`,
@@ -889,11 +963,32 @@ export async function runSituationInvestigation(params: {
         });
       }
 
-      const causes = parsedPayload.causes.map((c) => ({
-        summary: c.summary,
-        factIds: c.fact_ids,
-        facts: c.fact_ids.map((id) => localFacts[id]).filter((f): f is Fact => Boolean(f)),
-      }));
+      const fallbackCauseSummary =
+        codeFallbackWording.causes[0]?.summary ?? 'Verified store cause based on computed facts.';
+      const causes = parsedPayload.causes.map((c) => {
+        const cleanSummary = resolveTextPlaceholdersWithFallback(
+          c.summary,
+          localFacts,
+          fallbackCauseSummary,
+        );
+        if (cleanSummary.usedFallback) {
+          anySentenceFallback = true;
+        }
+        return {
+          summary: cleanSummary.text,
+          factIds: c.fact_ids,
+          facts: c.fact_ids.map((id) => localFacts[id]).filter((f): f is Fact => Boolean(f)),
+        };
+      });
+
+      const cleanOutcomeDetail = resolveTextPlaceholdersWithFallback(
+        parsedPayload.outcome_detail,
+        localFacts,
+        codeFallbackWording.outcomeDetail,
+      );
+      if (cleanOutcomeDetail.usedFallback) {
+        anySentenceFallback = true;
+      }
 
       const isLetGo = parsedPayload.outcome_kind === 'nothing_to_do';
       const resolvedOutcomeKind: InvestigationOutcomeKind =
@@ -932,18 +1027,18 @@ export async function runSituationInvestigation(params: {
         candidateId: situation.candidateId,
         status: isLetGo ? 'let_go' : 'confirmed',
         confirmed: parsedPayload.confirmed,
-        findingSegments,
-        causeSegments,
-        proposalSegments,
+        findingSegments: cleanFinding.segments,
+        causeSegments: cleanCause.segments,
+        proposalSegments: cleanProposal.segments,
         causes,
         ruledOut,
         options: finalOptions,
         outcomeKind: resolvedOutcomeKind,
-        outcomeDetail: parsedPayload.outcome_detail,
+        outcomeDetail: cleanOutcomeDetail.text,
         model,
         mode: finalMode,
         latencyMs: totalLatency,
-        usedFallbackWording: false,
+        usedFallbackWording: anySentenceFallback,
         toolTrace,
         factsById: localFacts,
         secondCheck,

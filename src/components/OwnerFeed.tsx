@@ -10,6 +10,7 @@ import {
 } from '../types/domain';
 import { formatShortDate } from '../engine/calendar';
 import { createFact } from '../engine/facts';
+import { stripUnresolvedBraces } from '../gemini/placeholders';
 import { FactValue } from './FactValue';
 
 export interface ActiveInvestigationBanner {
@@ -60,16 +61,18 @@ const DISMISS_REASONS: Array<{ value: DismissReason; label: string }> = [
 ];
 
 export function toPlainOwnerWords(raw: string): string {
-  return raw
-    .replace(/\bdonor stores\b/gi, 'stores with stock to spare')
-    .replace(/\bDonor stores\b/g, 'Stores with stock to spare')
-    .replace(/\bdonor store\b/gi, 'store with stock to spare')
-    .replace(/\bdonor\b/gi, 'spare-stock')
-    .replace(/\bwks of cover\b/gi, 'weeks of stock left')
-    .replace(/\bweeks of cover\b/gi, 'weeks of stock left')
-    .replace(/\bwks\b/gi, 'weeks')
-    .replace(/\bLFL\b/g, 'comparable stores')
-    .replace(/\bTool to build:\s*/i, '');
+  return stripUnresolvedBraces(
+    raw
+      .replace(/\bdonor stores\b/gi, 'stores with stock to spare')
+      .replace(/\bDonor stores\b/g, 'Stores with stock to spare')
+      .replace(/\bdonor store\b/gi, 'store with stock to spare')
+      .replace(/\bdonor\b/gi, 'spare-stock')
+      .replace(/\bwks of cover\b/gi, 'weeks of stock left')
+      .replace(/\bweeks of cover\b/gi, 'weeks of stock left')
+      .replace(/\bwks\b/gi, 'weeks')
+      .replace(/\bLFL\b/g, 'comparable stores')
+      .replace(/\bTool to build:\s*/i, ''),
+  );
 }
 
 function formatSecondsFromMs(ms: number): string {
@@ -300,7 +303,7 @@ export function OwnerFeed({
                 <div key={item.candidateId} className="p-4 space-y-2.5" data-card-id={item.candidateId}>
                   {/* 1. Title + date */}
                   <div className="flex items-baseline justify-between gap-3">
-                    <h3 className="text-sm font-semibold text-[#B45309]">{item.title}</h3>
+                    <h3 className="text-sm font-semibold text-[#B45309]">{toPlainOwnerWords(item.title)}</h3>
                     <span className="text-xs font-mono text-[#78716C] shrink-0">
                       {formatShortDate(item.firstDetectedOn)}
                     </span>
@@ -778,7 +781,7 @@ export function OwnerFeed({
                             </p>
                           )}
                           <p className="text-[11px] text-[#57534E] pt-1 border-t border-[#E0E7FF]">
-                            Measure: {plan.measure}
+                            Measure: {toPlainOwnerWords(plan.measure)}
                           </p>
                         </div>
                       )}

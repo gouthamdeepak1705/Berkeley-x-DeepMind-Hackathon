@@ -52,10 +52,11 @@ export function RealityNoteModal({ open, onClose }: RealityNoteModalProps) {
             pass three verification checks before opening.
           </p>
           <p>
-            <strong className="font-semibold text-[#171717]">Replay &amp; Live AI models:</strong>{' '}
-            By default the run opens in Replay using pre-recorded real Gemini answers with zero live
-            API cost. You can switch to Live in the right panel to make fresh calls against these
-            jobs from settings:
+            <strong className="font-semibold text-[#171717]">Recorded &amp; Live AI models:</strong>{' '}
+            By default the run opens in Recorded, live when needed — using pre-recorded real Gemini
+            answers on the standard path with zero live API cost, and calling Gemini live (within
+            daily caps) whenever you take a different path. You can switch to Always live in the
+            right panel to make fresh calls against these jobs from settings:
           </p>
           <ul className="bg-[#FAF8F5] border border-[#E6E1D8] rounded-lg p-3 space-y-1.5 text-xs">
             {jobList.map((job) => (

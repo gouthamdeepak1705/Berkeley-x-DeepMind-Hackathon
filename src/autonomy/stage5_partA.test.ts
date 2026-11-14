@@ -321,3 +321,105 @@ test('Regression: snapshot cache hits preserve autonomous decisions when evaluat
   }
 });
 
+test('Fix 4: Dismissing Walnut Creek knitwear on Sep 25 still raises Pasadena on Oct 15 and Napa on Nov 1', async () => {
+  const prevKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = '';
+  clearTimelineSnapshotCache();
+
+  try {
+    const baseSim = runSimulation(DEFAULT_SEED);
+    const idx = (d: string) => baseSim.liveDates.indexOf(d);
+    const decisions: ActionDecision[] = [];
+    const reactions: CardReaction[] = [];
+
+    // 1. Dismiss Walnut Creek Knitwear on Sep 25
+    const sep25 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-09-25'),
+      decisions,
+      reactions,
+      investigateTargetDay: true,
+    });
+    const wcCard = sep25.dayState.raised.find((r) => r.candidateId === 'situation:stock_running_out:knitwear');
+    assert.ok(wcCard, 'Walnut Creek Knitwear must raise on 2026-09-25');
+    reactions.push({
+      id: 'r:dismiss:wc',
+      candidateId: wcCard.candidateId,
+      date: '2026-09-25',
+      dayIndex: idx('2026-09-25'),
+      reaction: 'dismiss',
+      reason: 'not_important',
+    });
+
+    // 2. Sep 26: Walnut Creek stays dismissed
+    const sep26 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-09-26'),
+      decisions,
+      reactions,
+      investigateTargetDay: true,
+    });
+    assert.ok(
+      !sep26.dayState.raised.some((r) => r.candidateId === 'situation:stock_running_out:knitwear'),
+      'Dismissed Walnut Creek card must stay closed on Sep 26',
+    );
+
+    // 3. Oct 15: Pasadena Knitwear MUST raise independently and only include Pasadena
+    const oct15 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-10-15'),
+      decisions,
+      reactions,
+      investigateTargetDay: true,
+    });
+    const pasCard = oct15.dayState.raised.find((r) => r.candidateId === 'situation:stock_running_out:knitwear');
+    assert.ok(pasCard, 'Pasadena Knitwear must still raise on 2026-10-15 after Walnut Creek dismissal');
+    assert.deepEqual(
+      pasCard.stores?.map((s) => s.storeId),
+      ['pasadena'],
+      'Pasadena card must contain only Pasadena',
+    );
+    assert.deepEqual(pasCard.transferPlan?.receiverStoreIds, ['pasadena']);
+    assert.equal(pasCard.investigation?.jobKey, 'investigate_routine');
+
+    // Approve Pasadena so Nov 1 Napa also surfaces cleanly
+    const pasGw = executeActionThroughGateway(
+      {
+        candidateId: pasCard.candidateId,
+        date: '2026-10-15',
+        kind: 'transfer',
+        groupId: 'knitwear',
+        ownerApproved: true,
+        plan: pasCard.transferPlan,
+      },
+      oct15.sim,
+    );
+    decisions.push(pasGw.decision!);
+    reactions.push({
+      id: 'r:approve:pas',
+      candidateId: pasCard.candidateId,
+      date: '2026-10-15',
+      dayIndex: idx('2026-10-15'),
+      reaction: 'approve',
+    });
+
+    // 4. Nov 1: Napa Knitwear MUST also raise independently
+    const nov1 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-11-01'),
+      decisions,
+      reactions,
+      investigateTargetDay: true,
+    });
+    const napaCard = nov1.dayState.raised.find((r) => r.candidateId === 'situation:stock_running_out:knitwear');
+    assert.ok(napaCard, 'Napa Knitwear must still raise on 2026-11-01');
+    assert.deepEqual(
+      napaCard.stores?.map((s) => s.storeId),
+      ['napa'],
+    );
+  } finally {
+    if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
+    else delete process.env.GEMINI_API_KEY;
+  }
+});
+

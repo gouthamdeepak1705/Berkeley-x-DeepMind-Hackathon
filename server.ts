@@ -42,6 +42,7 @@ import {
   CardReaction,
   DismissReason,
   InvestigationResult,
+  RaisedItem,
   TraceEntry,
 } from './src/types/domain';
 
@@ -243,8 +244,22 @@ async function startServer() {
           .filter((r) => r.reaction === 'approve' || r.reaction === 'dismiss')
           .map((r) => r.candidateId),
       );
-      const isClosedForEpisode = (candidateId: string, firstDetectedOn: string): boolean => {
+      const isClosedForEpisode = (
+        candidateId: string,
+        firstDetectedOn: string,
+        stores?: RaisedItem['stores'],
+      ): boolean => {
         if (candidateId.startsWith('situation:stock_running_out:')) {
+          if (stores && stores.length > 0) {
+            return stores.every((st) =>
+              reactions.some(
+                (r) =>
+                  r.candidateId === candidateId &&
+                  (r.reaction === 'approve' || r.reaction === 'dismiss') &&
+                  r.date >= st.firstDetectedOn,
+              ),
+            );
+          }
           return reactions.some(
             (r) =>
               r.candidateId === candidateId &&
@@ -268,7 +283,7 @@ async function startServer() {
               .filter(
                 (r) =>
                   !clientOpenIds.has(r.candidateId) &&
-                  !isClosedForEpisode(r.candidateId, r.firstDetectedOn) &&
+                  !isClosedForEpisode(r.candidateId, r.firstDetectedOn, r.stores) &&
                   !deferredIdsAtFrom.has(r.candidateId) &&
                   !r.groundTruth?.startsWith('near_miss:'),
               )
@@ -315,7 +330,7 @@ async function startServer() {
           (r) =>
             (!baseRaisedIds.has(r.candidateId) ||
               r.candidateId.startsWith('situation:stock_running_out:knitwear')) &&
-            !isClosedForEpisode(r.candidateId, r.firstDetectedOn) &&
+            !isClosedForEpisode(r.candidateId, r.firstDetectedOn, r.stores) &&
             !r.groundTruth?.startsWith('near_miss:'),
         );
         const hasNewLetGoGroup = ds.groupedLetGo.some(
@@ -775,10 +790,15 @@ async function startServer() {
         return;
       }
 
+      const disSetLook =
+        targetItem.detectorKind === 'stock_running_out' && targetItem.groupId
+          ? preStep.dismissedStockStores?.get(targetItem.groupId)
+          : undefined;
       const freshInv = await runSituationInvestigation({
         situation: targetItem,
         sim: preStep.sim,
         date: preStep.dayState.date,
+        dismissedStores: disSetLook && disSetLook.size > 0 ? disSetLook : undefined,
         bypassCache: true,
       });
       provided.set(targetItem.candidateId, freshInv);
@@ -1378,11 +1398,16 @@ async function startServer() {
         return;
       }
 
+      const disSetStream =
+        targetSituation.detectorKind === 'stock_running_out' && targetSituation.groupId
+          ? preStep.dismissedStockStores?.get(targetSituation.groupId)
+          : undefined;
       const invResult = await runSituationInvestigation({
         situation: targetSituation,
         sim: preStep.sim,
         date: preStep.dayState.date,
         controlStores,
+        dismissedStores: disSetStream && disSetStream.size > 0 ? disSetStream : undefined,
         onEvent: (ev) => {
           sendEvent('step', ev);
         },

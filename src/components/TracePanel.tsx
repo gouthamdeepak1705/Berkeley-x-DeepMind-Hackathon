@@ -148,26 +148,26 @@ export function TracePanel({
               disabled={switchingMode}
               onClick={() => onChangeGeminiMode('replay')}
               aria-pressed={geminiMode === 'replay'}
-              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                 geminiMode === 'replay'
                   ? 'bg-white text-[#312E81] shadow-xs font-semibold'
                   : 'text-[#57534E] hover:text-[#171717]'
               }`}
             >
-              Replay
+              Recorded, live when needed
             </button>
             <button
               type="button"
               disabled={switchingMode}
               onClick={() => onChangeGeminiMode('live')}
               aria-pressed={geminiMode === 'live'}
-              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                 geminiMode === 'live'
                   ? 'bg-white text-[#15803D] shadow-xs font-semibold'
                   : 'text-[#57534E] hover:text-[#171717]'
               }`}
             >
-              Live
+              Always live
             </button>
           </div>
 
