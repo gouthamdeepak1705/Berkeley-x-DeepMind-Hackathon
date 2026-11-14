@@ -57,7 +57,11 @@ export function DayOneScreen({
               <span className="text-[11px] font-mono text-[#78716C]">Drafting brief...</span>
             ) : brief.narrativeMeta ? (
               <span className="text-[11px] font-mono text-[#78716C]">
-                {brief.narrativeMeta.model} · {brief.narrativeMeta.mode}
+                {brief.narrativeMeta.model} ·{' '}
+                {brief.narrativeMeta.latencyMs > 0
+                  ? `${brief.narrativeMeta.latencyMs} ms${brief.narrativeMeta.mode === 'replayed' ? ' (replayed)' : ''} · `
+                  : ''}
+                {brief.narrativeMeta.mode}
               </span>
             ) : null}
           </div>

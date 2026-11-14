@@ -224,6 +224,7 @@ export interface InvestigationRuledOut {
   label: string;
   ruledOut: boolean;
   summary: string;
+  summarySegments?: TextSegment[];
   fact?: Fact;
 }
 
@@ -250,6 +251,48 @@ export interface InvestigationToolTrace {
   facts: Fact[];
 }
 
+export interface SecondCheckResult {
+  status: 'matched' | 'disagreed' | 'unavailable';
+  label: string;
+  firstValueFact: Fact;
+  secondValueFact?: Fact;
+  diffPct?: number;
+  model: string;
+  mode: 'live' | 'replayed' | 'fallback';
+  latencyMs: number;
+  pythonCode?: string;
+  error?: string;
+}
+
+export interface TransferLine {
+  fromStoreId: StoreId;
+  fromStoreName: string;
+  toStoreId: StoreId;
+  toStoreName: string;
+  groupId: 'best_sellers' | 'knitwear';
+  units: number;
+}
+
+export interface TransferPlan {
+  groupId: 'best_sellers' | 'knitwear';
+  groupName: string;
+  receiverStoreIds: StoreId[];
+  treatedStoreIds: StoreId[];
+  holdoutStoreId?: StoreId;
+  holdoutStoreName?: string;
+  holdoutSentence?: string;
+  limitSentence: string;
+  nextDeliveryDate: string | null;
+  transferLines: TransferLine[];
+  totalUnitsFact: Fact;
+  shortfallUnitsFact?: Fact;
+  arrivalDate: string;
+  weeklyRecoveryFact: Fact;
+  measure: string;
+  proofEndDate: string;
+  requiresOwnerApproval: boolean;
+}
+
 export interface InvestigationResult {
   candidateId: string;
   status: 'pending' | 'running' | 'confirmed' | 'let_go';
@@ -268,6 +311,8 @@ export interface InvestigationResult {
   usedFallbackWording: boolean;
   toolTrace: InvestigationToolTrace[];
   factsById: Record<string, Fact>;
+  secondCheck?: SecondCheckResult;
+  transferPlan?: TransferPlan;
 }
 
 export interface InstinctMeta {
@@ -301,19 +346,45 @@ export interface RaisedItem {
   groundTruth?: GroundTruthTag;
   instinctMeta?: InstinctMeta;
   investigation?: InvestigationResult;
+  secondCheck?: SecondCheckResult;
+  transferPlan?: TransferPlan;
+  deferredOn?: string;
+  reRaisedOn?: string;
+  reRaiseReason?: string;
+  costOfDelayFact?: Fact;
+  isRollout?: boolean;
+  parentDecisionId?: string;
 }
 
 export type TraceLane = 'manager' | 'data_scientist' | 'developer';
+
+export interface DecisionTraceRow {
+  candidateId: string;
+  title: string;
+  choice: 'raise_now' | 'keep_watching' | 'stay_quiet';
+  confidence: number;
+  explainedProb: number;
+  urgencyLevel?: string;
+}
 
 export interface TraceEntry {
   id: string;
   date: string;
   lane: TraceLane;
-  kind: 'detector' | 'silence_check' | 'decision' | 'note' | 'tool_call' | 'investigation';
+  kind:
+    | 'detector'
+    | 'silence_check'
+    | 'decision'
+    | 'note'
+    | 'tool_call'
+    | 'investigation'
+    | 'gateway'
+    | 'followup';
   headline: string;
   detail: string;
   outcome: 'let_go' | 'raised' | 'info';
   facts?: Fact[];
+  decisionRows?: DecisionTraceRow[];
   meta?: {
     model?: string;
     mode?: 'live' | 'replayed' | 'fallback';
@@ -324,6 +395,18 @@ export interface TraceEntry {
   };
 }
 
+export type DismissReason = 'not_important' | 'already_known' | 'wrong' | 'not_mine';
+
+export interface CardReaction {
+  id: string;
+  candidateId: string;
+  date: string;
+  dayIndex: number;
+  reaction: 'approve' | 'not_now' | 'dismiss';
+  reason?: DismissReason;
+  detail?: string;
+}
+
 export interface ActionDecision {
   id: string;
   date: string;
@@ -331,6 +414,44 @@ export interface ActionDecision {
   kind: 'transfer' | 'control_holdout' | 'refund_audit' | 'other';
   storeId?: StoreId;
   groupId?: ProductGroupId;
+  arrivalDate?: string;
+  transferLines?: TransferLine[];
+  holdoutStoreId?: StoreId;
+  holdoutStoreName?: string;
+  totalUnits?: number;
+  approvedBy?: string;
+  approvedAtDate?: string;
+  measure?: string;
+  proofEndDate?: string;
+  undoneOnDate?: string;
+  parentDecisionId?: string;
+  title?: string;
+}
+
+export interface InProgressAction {
+  decisionId: string;
+  candidateId: string;
+  title: string;
+  measure: string;
+  statusText: string;
+  nextCheckpoint: string;
+  endDate: string;
+  arrivalDate: string;
+  holdoutStoreName?: string;
+  latestGapPtsFact?: Fact;
+}
+
+export interface DoneForYouItem {
+  decisionId: string;
+  candidateId: string;
+  title: string;
+  verdict: 'worked_proven' | 'unclear' | 'did_not_work';
+  verdictSentence: string;
+  approvedOn: string;
+  closedOn: string;
+  provenMoneyFact?: Fact;
+  undone?: boolean;
+  holdoutStoreName?: string;
 }
 
 export interface DayOneBrief {
@@ -393,12 +514,15 @@ export interface DayState {
     lfl28dVsExpectedPct: Fact;
   };
   raised: RaisedItem[];
+  inProgress?: InProgressAction[];
+  doneForYou?: DoneForYouItem[];
   noticedAndLetGo: NoticedAndLetGoItem[];
   groupedLetGo: GroupedLetGoItem[];
   trace: TraceEntry[];
   todayCandidates: Candidate[];
   watcherEvalLog?: WatcherEvalRecord[];
   pendingInvestigationId?: string;
+  reactions?: CardReaction[];
 }
 
 export interface DiagnosticTargetResult {

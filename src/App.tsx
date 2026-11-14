@@ -11,8 +11,10 @@ import { DEFAULT_SEED } from './engine/prng';
 import { buildLiveTimeline, runFullDiagnostics } from './engine/runner';
 import {
   ActionDecision,
+  CardReaction,
   DayOneBrief,
   DayState,
+  DismissReason,
   Fact,
   InvestigationResult,
   RaisedItem,
@@ -50,6 +52,8 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [speed, setSpeed] = useState<PlaybackSpeed>(1);
   const [stepping, setStepping] = useState<boolean>(false);
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [activeInvestigation, setActiveInvestigation] =
     useState<ActiveInvestigationBanner | null>(null);
   const [telemetry, setTelemetry] = useState<UsageBannerState | null>(null);
@@ -58,6 +62,7 @@ export default function App() {
   const [showRealityNote, setShowRealityNote] = useState<boolean>(false);
 
   const decisionsRef = useRef<ActionDecision[]>([]);
+  const reactionsRef = useRef<CardReaction[]>([]);
   const completedInvRef = useRef<Record<string, InvestigationResult>>({});
   const resumeAfterInvestigationRef = useRef<boolean>(false);
   const isMountedRef = useRef<boolean>(true);
@@ -134,6 +139,7 @@ export default function App() {
             seed: DEFAULT_SEED,
             dayIndex: targetDayIdx,
             decisions: decisionsRef.current,
+            reactions: reactionsRef.current,
             controlStores: [],
             situationId: pending.candidateId,
             completedInvestigations: completedInvRef.current,
@@ -208,6 +214,7 @@ export default function App() {
             seed: DEFAULT_SEED,
             dayIndex: targetDayIdx,
             decisions: decisionsRef.current,
+            reactions: reactionsRef.current,
             controlStores: [],
             investigateTargetDay: true,
             completedInvestigations: completedInvRef.current,
@@ -244,6 +251,7 @@ export default function App() {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
       setStepping(true);
+      setActionError(null);
       try {
         const res = await fetch('/api/timeline/step', {
           method: 'POST',
@@ -252,6 +260,7 @@ export default function App() {
             seed: DEFAULT_SEED,
             dayIndex: targetIdx,
             decisions: decisionsRef.current,
+            reactions: reactionsRef.current,
             controlStores: [],
             investigateTargetDay: false,
             completedInvestigations: completedInvRef.current,
@@ -326,33 +335,160 @@ export default function App() {
     stepToDay,
   ]);
 
-  // Determine next event day index from deterministic Stage 1 detector timeline
-  const nextEventIndex = useMemo(() => {
-    const baseStates = baseTimeline.dayStates;
-    const baseTraceCount = baseStates[dayIndex]?.trace.length ?? 0;
-    for (let i = dayIndex + 1; i < baseStates.length; i++) {
-      if (baseStates[i].trace.length > baseTraceCount) {
-        return i;
-      }
-    }
-    return null;
-  }, [dayIndex, baseTimeline.dayStates]);
-
-  const handleSkipToNextEvent = () => {
+  const handleSkipToNextEvent = async () => {
     setIsPlaying(false);
-    if (nextEventIndex !== null && !activeInvestigation && !stepping) {
-      void stepToDay(nextEventIndex, false);
+    if (activeInvestigation || stepping || dayIndex >= totalDays - 1) return;
+    setStepping(true);
+    try {
+      const res = await fetch('/api/timeline/next-event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seed: DEFAULT_SEED,
+          fromDayIndex: dayIndex,
+          decisions: decisionsRef.current,
+          reactions: reactionsRef.current,
+          controlStores: [],
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { nextDayIndex: number | null };
+        if (typeof data.nextDayIndex === 'number') {
+          setStepping(false);
+          await stepToDay(data.nextDayIndex, false);
+          return;
+        }
+      }
+    } finally {
+      setStepping(false);
     }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
     setIsPlaying(false);
     setActiveInvestigation(null);
+    setActionError(null);
     resumeAfterInvestigationRef.current = false;
+    decisionsRef.current = [];
+    reactionsRef.current = [];
     completedInvRef.current = {};
     setDayIndex(0);
     setCurrentDayState(baseTimeline.dayStates[0]);
+    try {
+      await fetch('/api/timeline/reset-log', { method: 'POST' });
+    } catch {
+      // ignore
+    }
     void stepToDay(0, false);
+  };
+
+  const handleApproveCard = async (candidateId: string) => {
+    if (actionBusyId) return;
+    setIsPlaying(false);
+    setActionBusyId(candidateId);
+    setActionError(null);
+    try {
+      const res = await fetch('/api/action/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seed: DEFAULT_SEED,
+          dayIndex,
+          candidateId,
+          decisions: decisionsRef.current,
+          reactions: reactionsRef.current,
+          completedInvestigations: completedInvRef.current,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setActionError(data.refusalReason ?? data.error ?? 'Action could not be approved.');
+        return;
+      }
+      if (data.decision) {
+        decisionsRef.current = [...decisionsRef.current, data.decision as ActionDecision];
+      }
+      if (data.reaction) {
+        reactionsRef.current = [...reactionsRef.current, data.reaction as CardReaction];
+      }
+      if (data.dayState) setCurrentDayState(data.dayState as DayState);
+      if (data.usage) setTelemetry(data.usage as UsageBannerState);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const handleReactCard = async (
+    candidateId: string,
+    reaction: 'not_now' | 'dismiss',
+    reason?: DismissReason,
+  ) => {
+    if (actionBusyId) return;
+    setIsPlaying(false);
+    setActionBusyId(candidateId);
+    setActionError(null);
+    try {
+      const res = await fetch('/api/action/react', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seed: DEFAULT_SEED,
+          dayIndex,
+          candidateId,
+          reaction,
+          reason,
+          decisions: decisionsRef.current,
+          reactions: reactionsRef.current,
+          completedInvestigations: completedInvRef.current,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        if (data.reaction) {
+          reactionsRef.current = [...reactionsRef.current, data.reaction as CardReaction];
+        }
+        if (data.dayState) setCurrentDayState(data.dayState as DayState);
+        if (data.usage) setTelemetry(data.usage as UsageBannerState);
+      }
+    } finally {
+      setActionBusyId(null);
+    }
+  };
+
+  const handleLookAgainCard = async (candidateId: string) => {
+    if (actionBusyId) return;
+    setIsPlaying(false);
+    setActionBusyId(candidateId);
+    setActionError(null);
+    try {
+      const res = await fetch('/api/action/look-again', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seed: DEFAULT_SEED,
+          dayIndex,
+          candidateId,
+          decisions: decisionsRef.current,
+          reactions: reactionsRef.current,
+          completedInvestigations: completedInvRef.current,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        if (data.investigation) {
+          completedInvRef.current = {
+            ...completedInvRef.current,
+            [candidateId]: data.investigation as InvestigationResult,
+          };
+        }
+        if (data.dayState) setCurrentDayState(data.dayState as DayState);
+        if (data.usage) setTelemetry(data.usage as UsageBannerState);
+      }
+    } finally {
+      setActionBusyId(null);
+    }
   };
 
   const navigateToDev = () => {
@@ -409,7 +545,7 @@ export default function App() {
             totalDays={totalDays}
             isPlaying={isPlaying}
             speed={speed}
-            hasNextEvent={nextEventIndex !== null}
+            hasNextEvent={dayIndex < totalDays - 1}
             onTogglePlay={() => setIsPlaying((p) => !p)}
             onChangeSpeed={setSpeed}
             onSkipToNextEvent={handleSkipToNextEvent}
@@ -422,10 +558,24 @@ export default function App() {
             onInspectFact={setInspectedFact}
           />
 
+          {actionError && (
+            <div
+              role="alert"
+              className="mt-4 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs text-[#991B1B]"
+            >
+              {actionError}
+            </div>
+          )}
+
           <OwnerFeed
             dayState={currentDayState}
             activeInvestigation={activeInvestigation}
+            actionBusyId={actionBusyId}
             onInspectFact={setInspectedFact}
+            onApproveCard={handleApproveCard}
+            onNotNowCard={(id) => handleReactCard(id, 'not_now')}
+            onDismissCard={(id, reason) => handleReactCard(id, 'dismiss', reason)}
+            onLookAgainCard={handleLookAgainCard}
           />
 
           <footer className="mt-8 pt-4 border-t border-[#E6E1D8] flex items-center justify-between text-xs text-[#78716C]">

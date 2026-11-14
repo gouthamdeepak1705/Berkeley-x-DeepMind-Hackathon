@@ -239,10 +239,49 @@ export function runSimulation(
       }
     }
 
-    // Apply any explicit transfer decisions scheduled for this date (prepared for Stage 4)
+    // Apply gateway-approved transfer decisions (deduct from donor on approval, arrive at receiver +2 days, or undo)
     for (const decision of decisions) {
-      if (decision.date === date && decision.kind === 'transfer' && decision.storeId && decision.groupId) {
-        // Placeholder hook for gateway-approved transfers in Stage 4
+      if (decision.kind !== 'transfer' || !decision.transferLines || decision.transferLines.length === 0) {
+        continue;
+      }
+      const gid = decision.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
+      const arrivalDate = decision.arrivalDate ?? addDays(decision.date, 2);
+
+      if (decision.date === date) {
+        for (const line of decision.transferLines) {
+          stockByStore[line.fromStoreId][gid] = Math.max(
+            0,
+            stockByStore[line.fromStoreId][gid] - line.units,
+          );
+        }
+      }
+
+      if (arrivalDate === date && (!decision.undoneOnDate || arrivalDate <= decision.undoneOnDate)) {
+        for (const line of decision.transferLines) {
+          const stockBefore = stockByStore[line.toStoreId][gid];
+          const stockAfter = stockBefore + line.units;
+          stockByStore[line.toStoreId][gid] = stockAfter;
+          if (line.units > 0) {
+            deliveredEvents.push({
+              date,
+              storeId: line.toStoreId,
+              groupId: gid,
+              unitsAdded: line.units,
+              stockBefore,
+              stockAfter,
+              returnedFromZero: stockBefore <= 0.001 && stockAfter > 0.001,
+            });
+          }
+        }
+      }
+
+      if (decision.undoneOnDate === date) {
+        for (const line of decision.transferLines) {
+          const available = stockByStore[line.toStoreId][gid];
+          const reversed = Math.min(available, line.units);
+          stockByStore[line.toStoreId][gid] = Math.max(0, available - reversed);
+          stockByStore[line.fromStoreId][gid] += reversed;
+        }
       }
     }
 

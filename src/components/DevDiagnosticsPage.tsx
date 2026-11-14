@@ -33,10 +33,27 @@ interface DevDiagnosticsPageProps {
   onBack: () => void;
 }
 
+interface GatewayTestCase {
+  id: string;
+  label: string;
+  ok: boolean;
+  refusedAsExpected: boolean;
+  reason: string;
+}
+
+interface GatewayTestReport {
+  date: string;
+  allRefused: boolean;
+  cases: GatewayTestCase[];
+}
+
 export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) {
   const [testing, setTesting] = useState(false);
   const [connReport, setConnReport] = useState<ConnectionTestReport | null>(null);
   const [connError, setConnError] = useState<string | null>(null);
+
+  const [gwTesting, setGwTesting] = useState(false);
+  const [gwReport, setGwReport] = useState<GatewayTestReport | null>(null);
 
   const handleRunConnectionTests = async () => {
     setTesting(true);
@@ -53,6 +70,18 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
       setConnError(err instanceof Error ? err.message : String(err));
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handleRunGatewayTests = async () => {
+    setGwTesting(true);
+    try {
+      const res = await fetch('/api/dev/gateway-test', { method: 'POST' });
+      if (res.ok) {
+        setGwReport((await res.json()) as GatewayTestReport);
+      }
+    } finally {
+      setGwTesting(false);
     }
   };
 
@@ -86,11 +115,11 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 id="connection-test-heading" className="text-base font-semibold text-[#171717]">
-                Gemini Connection Test (v1beta · Decisions &amp; Interactions API)
+                Gemini Connection Test (v1beta · Decisions, Interactions &amp; Code Execution)
               </h2>
               <p className="mt-1 text-xs text-[#57534E]">
                 Runs one tiny real call for each job in settings: Decisions API, function calling on
-                large &amp; routine models, and structured JSON output.
+                large &amp; routine models, structured JSON output, and Python code execution.
               </p>
             </div>
             <button
@@ -174,6 +203,56 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
                       ))}
                     </div>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Stage 3 Gateway Forbidden-Actions Self-Test Panel */}
+        <section
+          aria-labelledby="gateway-test-heading"
+          className="mt-6 bg-white border border-[#E6E1D8] rounded-xl p-5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 id="gateway-test-heading" className="text-base font-semibold text-[#171717]">
+                Action Gateway Limits Check
+              </h2>
+              <p className="mt-1 text-xs text-[#57534E]">
+                Attempts 3 forbidden actions (donor left at 2 weeks cover, 900-unit transfer with no
+                approval, and direct stock bypass) and verifies every one is refused and logged.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunGatewayTests}
+              disabled={gwTesting}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{gwTesting ? 'Running...' : 'Run gateway limits test'}</span>
+            </button>
+          </div>
+
+          {gwReport && (
+            <div className="mt-4 space-y-2">
+              {gwReport.cases.map((c) => (
+                <div
+                  key={c.id}
+                  className="p-3 rounded-lg border border-[#E6E1D8] bg-[#FAF8F5] flex items-start justify-between gap-3 text-xs"
+                >
+                  <div>
+                    <p className="font-semibold text-[#171717]">{c.label}</p>
+                    <p className="mt-0.5 text-[#57534E]">{c.reason}</p>
+                  </div>
+                  <span
+                    className={`font-mono font-semibold shrink-0 ${
+                      c.refusedAsExpected ? 'text-[#15803D]' : 'text-[#991B1B]'
+                    }`}
+                  >
+                    {c.refusedAsExpected ? 'Refused' : 'Allowed'}
+                  </span>
                 </div>
               ))}
             </div>

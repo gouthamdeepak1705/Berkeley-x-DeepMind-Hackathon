@@ -137,13 +137,34 @@ export function evaluateSilenceChecks(
       triggered = true;
       reason = `${STORE_MAP[candidate.storeId].name} is deliberately held out as a control store.`;
     } else {
-      const matchingDecision = decisions.find(
-        (d) =>
-          d.candidateId === candidate.id ||
-          (d.storeId &&
-            d.storeId === candidate.storeId &&
-            (!d.groupId || d.groupId === candidate.groupId)),
-      );
+      const matchingDecision = decisions.find((d) => {
+        if (d.date > date || d.undoneOnDate) return false;
+        if (d.candidateId === candidate.id) return true;
+        if (candidate.groupId && d.candidateId === `situation:stock_running_out:${candidate.groupId}`) {
+          if (
+            candidate.storeId &&
+            d.transferLines?.some(
+              (l) => l.toStoreId === candidate.storeId && l.groupId === candidate.groupId,
+            )
+          ) {
+            return true;
+          }
+          return false;
+        }
+        if (
+          candidate.storeId &&
+          d.transferLines?.some(
+            (l) => l.toStoreId === candidate.storeId && (!candidate.groupId || l.groupId === candidate.groupId),
+          )
+        ) {
+          return true;
+        }
+        return (
+          d.storeId !== undefined &&
+          d.storeId === candidate.storeId &&
+          (!d.groupId || d.groupId === candidate.groupId)
+        );
+      });
       if (matchingDecision) {
         triggered = true;
         reason = `Already handled by action ${matchingDecision.id} on ${matchingDecision.date}.`;

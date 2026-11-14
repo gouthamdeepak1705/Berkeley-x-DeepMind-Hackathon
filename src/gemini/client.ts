@@ -103,12 +103,16 @@ export interface DecisionResponsePayload {
   };
 }
 
-export interface InteractionToolDecl {
-  type: 'function';
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-}
+export type InteractionToolDecl =
+  | {
+      type: 'function';
+      name: string;
+      description: string;
+      parameters: Record<string, unknown>;
+    }
+  | {
+      type: 'code_execution';
+    };
 
 export interface InteractionResponseFormat {
   type: 'text';
@@ -350,19 +354,28 @@ export async function callDecisionsRaw(params: {
   });
 
   if (!params.bypassCache && responseCache.has(cacheKey)) {
-    const cached = responseCache.get(cacheKey) as DecisionResponsePayload;
-    const inputTokens = cached.usage?.total_input_tokens ?? 0;
-    const outputTokens = cached.usage?.total_output_tokens ?? 0;
+    const cached = responseCache.get(cacheKey) as {
+      payload: DecisionResponsePayload;
+      originalLatencyMs: number;
+    };
+    const inputTokens = cached.payload.usage?.total_input_tokens ?? 0;
+    const outputTokens = cached.payload.usage?.total_output_tokens ?? 0;
     recordGeminiCall({
       feature: params.feature,
       job: 'watcher',
       model: params.model,
-      latencyMs: 1,
+      latencyMs: cached.originalLatencyMs,
       inputTokens,
       outputTokens,
       mode: 'replayed',
     });
-    return { payload: cached, mode: 'replayed', latencyMs: 1, inputTokens, outputTokens };
+    return {
+      payload: cached.payload,
+      mode: 'replayed',
+      latencyMs: cached.originalLatencyMs,
+      inputTokens,
+      outputTokens,
+    };
   }
 
   const apiKey = getApiKey();
@@ -450,7 +463,10 @@ export async function callDecisionsRaw(params: {
     const outputTokens = rawResp.usage?.total_output_tokens ?? 0;
 
     if (!params.bypassCache) {
-      responseCache.set(cacheKey, rawResp);
+      responseCache.set(cacheKey, {
+        payload: rawResp,
+        originalLatencyMs: latencyMs,
+      });
     }
 
     recordGeminiCall({
@@ -512,12 +528,12 @@ export async function callInteractionRaw(params: {
   const cacheKey = hashRequest('interactions', params.model, cachePayload);
 
   if (!params.bypassCache && responseCache.has(cacheKey)) {
-    const cached = responseCache.get(cacheKey) as Omit<InteractionCallResult, 'mode' | 'latencyMs'>;
+    const cached = responseCache.get(cacheKey) as Omit<InteractionCallResult, 'mode'>;
     recordGeminiCall({
       feature: params.feature,
       job: params.job,
       model: params.model,
-      latencyMs: 1,
+      latencyMs: cached.latencyMs,
       inputTokens: cached.inputTokens,
       outputTokens: cached.outputTokens,
       mode: 'replayed',
@@ -525,7 +541,6 @@ export async function callInteractionRaw(params: {
     return {
       ...cached,
       mode: 'replayed',
-      latencyMs: 1,
     };
   }
 
@@ -617,6 +632,7 @@ export async function callInteractionRaw(params: {
       responseCache.set(cacheKey, {
         id: result.id,
         model: result.model,
+        latencyMs: result.latencyMs,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         output_text: result.output_text,
@@ -894,6 +910,80 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
         attempts.push({ model, ok: true, latencyMs: elapsed });
         answeredModel = model;
         detail = `Structured output: "${parsed.sentence ?? res.output_text}"`;
+        break;
+      } catch (err) {
+        const elapsed = Math.max(1, Date.now() - start);
+        totalMs += elapsed;
+        attempts.push({
+          model,
+          ok: false,
+          latencyMs: elapsed,
+          errorText: formatGeminiError(err),
+        });
+      }
+    }
+
+    results.push({
+      job: cfg.key,
+      label: cfg.label,
+      firstChoiceModel: cfg.models[0],
+      answeredModel,
+      usedFallback: answeredModel !== null && answeredModel !== cfg.models[0],
+      ok: answeredModel !== null,
+      latencyMs: totalMs,
+      detail: detail || attempts[attempts.length - 1]?.errorText || 'Failed',
+      attempts,
+    });
+  }
+
+  // 5. Code execution job: run tiny Python check via Interactions API code_execution tool
+  {
+    const cfg = GEMINI_SETTINGS.jobs.code_execution;
+    const attempts: ConnectionAttempt[] = [];
+    let answeredModel: string | null = null;
+    let totalMs = 0;
+    let detail = '';
+
+    for (let idx = 0; idx < cfg.models.length; idx++) {
+      const model = cfg.models[idx];
+      const timeoutMs = idx === 0 ? cfg.firstTimeoutMs : cfg.fallbackTimeoutMs;
+      const start = Date.now();
+      try {
+        const res = await callInteractionRaw({
+          job: 'code_execution',
+          feature: 'connection_test:code_execution',
+          model,
+          input:
+            'Use Python code_execution to sum [1200, 1500, 1800] and print ONLY the integer sum on the final line of stdout.',
+          tools: [{ type: 'code_execution' }],
+          timeoutMs,
+          bypassCache: true,
+          store: false,
+        });
+        const codeSteps = res.steps.filter((s) => s.type === 'code_execution_result');
+        const execText = codeSteps
+          .map((s) => {
+            if (typeof s.result === 'string') return s.result;
+            if (Array.isArray(s.result)) {
+              return s.result
+                .map((b) =>
+                  b && typeof b === 'object' && 'text' in b ? String((b as { text?: unknown }).text ?? '') : '',
+                )
+                .join('\n');
+            }
+            if (s.result && typeof s.result === 'object') {
+              const r = s.result as { output?: unknown; stdout?: unknown };
+              return String(r.output ?? r.stdout ?? '');
+            }
+            return '';
+          })
+          .join('\n')
+          .trim();
+        const elapsed = res.latencyMs;
+        totalMs += elapsed;
+        attempts.push({ model, ok: true, latencyMs: elapsed });
+        answeredModel = model;
+        detail = `Code execution (${codeSteps.length} result step(s)): "${(execText || res.output_text).slice(0, 120)}"`;
         break;
       } catch (err) {
         const elapsed = Math.max(1, Date.now() - start);

@@ -4,10 +4,20 @@ export interface PlaceholderValidationResult {
   ok: boolean;
   missingIds: string[];
   hasTypedDigits: boolean;
+  wordCount: number;
   segments: TextSegment[];
 }
 
 const PLACEHOLDER_REGEX = /\{\{([a-zA-Z0-9_:-]+)\}\}/g;
+
+export function countSegmentsWords(segments: TextSegment[]): number {
+  const plain = segments
+    .map((s) => (s.type === 'text' ? s.text : s.fact.formatted))
+    .join(' ')
+    .trim();
+  if (!plain) return 0;
+  return plain.split(/\s+/).filter(Boolean).length;
+}
 
 /**
  * Validates that a model-written template:
@@ -24,6 +34,7 @@ export function validateAndResolvePlaceholders(
       ok: false,
       missingIds: [],
       hasTypedDigits: false,
+      wordCount: 0,
       segments: [],
     };
   }
@@ -69,10 +80,13 @@ export function validateAndResolvePlaceholders(
     });
   }
 
+  const wordCount = countSegmentsWords(segments);
+
   return {
     ok: !hasTypedDigits && missingIds.length === 0 && segments.length > 0,
     missingIds,
     hasTypedDigits,
+    wordCount,
     segments,
   };
 }

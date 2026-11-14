@@ -2,7 +2,8 @@ export type GeminiJobKey =
   | 'watcher'
   | 'investigate_large'
   | 'investigate_routine'
-  | 'day_one_description';
+  | 'day_one_description'
+  | 'code_execution';
 
 export type ThinkingLevelSetting = 'low' | 'medium' | 'high';
 
@@ -66,6 +67,16 @@ export const GEMINI_SETTINGS = {
       fallbackTimeoutMs: 12000,
       capBucket: 'other',
     },
+    code_execution: {
+      key: 'code_execution',
+      label: 'Second check with Python (code execution)',
+      api: 'interactions',
+      models: ['gemini-4-hydrogen', 'gemini-3.8-flash'],
+      thinkingLevel: 'low',
+      firstTimeoutMs: 35000,
+      fallbackTimeoutMs: 25000,
+      capBucket: 'other',
+    },
   } satisfies Record<GeminiJobKey, GeminiJobConfig>,
 
   watcherThresholds: {
@@ -80,6 +91,7 @@ export const GEMINI_SETTINGS = {
   checkerLimits: {
     maxToolRounds: 10,
     maxPlaceholderRetries: 1,
+    maxProseWords: 25,
   },
 
   dailyCaps: {
@@ -87,13 +99,13 @@ export const GEMINI_SETTINGS = {
     other: 300,
   },
 
-  /** Approximate per-1M token pricing in USD for telemetry estimation */
+  /** Google list prices per 1M tokens in USD (input / output) */
   pricingPerMillionUsd: {
     'gemini-decision-1': { input: 0.10, output: 0.0 },
-    'gemini-3.5-flash-lite': { input: 0.10, output: 0.40 },
-    'gemini-3.8-flash': { input: 0.30, output: 2.50 },
-    'gemini-4-hydrogen': { input: 0.50, output: 3.00 },
-    'gemini-4-argon': { input: 1.25, output: 10.00 },
-    'gemini-4-carbon': { input: 2.50, output: 15.00 },
+    'gemini-4-carbon': { input: 2.00, output: 10.00 },
+    'gemini-4-argon': { input: 2.00, output: 10.00 },
+    'gemini-4-hydrogen': { input: 1.50, output: 7.50 },
+    'gemini-3.8-flash': { input: 0.75, output: 3.75 },
+    'gemini-3.5-flash-lite': { input: 0.30, output: 2.50 },
   } as Record<string, ModelPricingPerMillionUsd>,
 };

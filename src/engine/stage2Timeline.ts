@@ -1,12 +1,17 @@
 import { runSituationInvestigation } from '../checker/checker';
+import { buildTransferPlanForGroup } from '../checker/transferPlan';
 import { runDetectorsForDay } from '../detectors/detectors';
 import { applySilenceChecks } from '../detectors/silenceChecks';
+import { evaluateActionsUpToDate } from '../followup/proof';
+import { getGatewayAttemptLog } from '../gateway/gateway';
 import { evaluateWatcherBatch, WatcherSubjectOutcome } from '../watcher/watcher';
 import { WatcherSubject } from '../watcher/briefing';
 import {
   ActionDecision,
   Candidate,
+  CardReaction,
   DayState,
+  DecisionTraceRow,
   Fact,
   GroupedLetGoItem,
   InvestigationResult,
@@ -59,6 +64,15 @@ interface InternalSituation {
   groundTruth?: Candidate['groundTruth'];
   instinctMeta?: RaisedItem['instinctMeta'];
   investigation?: InvestigationResult;
+  deferredOn?: string;
+  reRaisedOn?: string;
+  reRaiseReason?: string;
+}
+
+interface DeferredSituationState {
+  deferredOn: string;
+  evidenceCountAtDefer: number;
+  consecutiveLostDaysAfterDefer: number;
 }
 
 interface WatchedState {
@@ -246,6 +260,31 @@ function addInvestigationTraceEntries(
     });
   }
 
+  if (inv.secondCheck) {
+    const sc = inv.secondCheck;
+    const scModeLabel = sc.mode === 'fallback' ? 'fallback, Gemini not used' : sc.mode;
+    const facts: Fact[] = [cloneFact(sc.firstValueFact)];
+    if (sc.secondValueFact) facts.push(cloneFact(sc.secondValueFact));
+    allTrace.push({
+      id: `trace:${date}:ds:second_check:${inv.candidateId}:${allTrace.length}`,
+      date,
+      lane: 'data_scientist',
+      kind: 'investigation',
+      headline: `Second check, Python, code execution (${sc.label})`,
+      detail:
+        sc.status === 'unavailable'
+          ? `Model ${sc.model} (${scModeLabel}) · ${sc.error ?? 'Not available'}`
+          : `Model ${sc.model} (${scModeLabel}, ${sc.latencyMs} ms) · First ${sc.firstValueFact.formatted} vs Python ${sc.secondValueFact?.formatted ?? 'n/a'} (diff ${sc.diffPct ?? 0}%)`,
+      outcome: sc.status === 'disagreed' ? 'let_go' : 'info',
+      facts,
+      meta: {
+        model: sc.model,
+        mode: sc.mode,
+        latencyMs: sc.latencyMs,
+      },
+    });
+  }
+
   allTrace.push({
     id: `trace:${date}:ds:inv:${inv.candidateId}:${allTrace.length}`,
     date,
@@ -354,6 +393,47 @@ function buildRaisedItemSnapshot(
       ? `${sit.title} — ${storeNames.join(', ')}`
       : sit.title;
 
+  let costOfDelayFact: Fact | undefined;
+  if (sit.reRaisedOn) {
+    if (
+      sit.detectorKind === 'stock_running_out' &&
+      (sit.groupId === 'best_sellers' || sit.groupId === 'knitwear')
+    ) {
+      const storeIds = Array.from(sit.stores.keys());
+      const lost = sumLostSalesForWindow(sim, storeIds, sit.groupId, sit.firstDetectedOn, date);
+      costOfDelayFact = createFact(
+        `sit:${sit.id}:delay_cost:${date}`,
+        'Cost of delay so far',
+        lost,
+        'USD',
+        `Expected minus actual ${getGroupDisplayName(sit.groupId)} sales across ${storeNames.join(', ')} from ${sit.firstDetectedOn} (when first raised) through ${date}.`,
+      );
+    } else {
+      const daysElapsed = Math.max(1, diffDays(sit.firstDetectedOn, date));
+      const estDelay = (sit.initialStakePerWeek.value / 7) * daysElapsed;
+      costOfDelayFact = createFact(
+        `sit:${sit.id}:delay_cost:${date}`,
+        'Cost of delay so far',
+        estDelay,
+        'USD',
+        `Estimated weekly exposure prorated over ${daysElapsed} days since first raised on ${sit.firstDetectedOn}.`,
+      );
+    }
+  }
+
+  let transferPlan = sit.investigation?.transferPlan;
+  if (
+    sit.detectorKind === 'stock_running_out' &&
+    (sit.groupId === 'best_sellers' || sit.groupId === 'knitwear') &&
+    (!transferPlan || date > sit.firstDetectedOn)
+  ) {
+    transferPlan = buildTransferPlanForGroup({
+      sim,
+      date,
+      groupId: sit.groupId,
+    }).plan;
+  }
+
   return {
     candidateId: sit.id,
     firstDetectedOn: sit.firstDetectedOn,
@@ -374,6 +454,12 @@ function buildRaisedItemSnapshot(
     groundTruth: sit.groundTruth,
     instinctMeta: sit.instinctMeta ? { ...sit.instinctMeta } : undefined,
     investigation: sit.investigation,
+    secondCheck: sit.investigation?.secondCheck,
+    transferPlan,
+    deferredOn: sit.deferredOn,
+    reRaisedOn: sit.reRaisedOn,
+    reRaiseReason: sit.reRaiseReason,
+    costOfDelayFact,
   };
 }
 
@@ -386,6 +472,7 @@ export async function evaluateStage2UpToDay(params: {
   seed?: number;
   targetDayIndex: number;
   decisions?: ActionDecision[];
+  reactions?: CardReaction[];
   controlStores?: Set<string>;
   /** If true, runs investigation synchronously even for newly raised situations on targetDayIndex */
   investigateTargetDay?: boolean;
@@ -393,12 +480,34 @@ export async function evaluateStage2UpToDay(params: {
   providedInvestigations?: Map<string, InvestigationResult>;
 }): Promise<Stage2StepResponse> {
   const seed = params.seed ?? DEFAULT_SEED;
-  const decisions = params.decisions ?? [];
-  const controlStores = params.controlStores ?? new Set<string>();
-  const sim = runSimulation(seed, decisions, LIVE_END_DATE);
+  let decisions = (params.decisions ?? []).map((d) => ({ ...d }));
+  const reactions = [...(params.reactions ?? [])].sort((a, b) =>
+    a.date === b.date ? 0 : a.date < b.date ? -1 : 1,
+  );
+  const baseControlStores = params.controlStores ?? new Set<string>();
+  let sim = runSimulation(seed, decisions, LIVE_END_DATE);
   const clampedTarget = Math.max(0, Math.min(sim.liveDates.length - 1, params.targetDayIndex));
+  const targetDateForUndoCheck = sim.liveDates[clampedTarget];
+
+  // Check if any action triggered an automatic undo before targetDate and apply deterministically
+  const preFollowUp = evaluateActionsUpToDate({
+    sim,
+    decisions,
+    date: targetDateForUndoCheck,
+  });
+  if (preFollowUp.undoneDecisionDates.size > 0) {
+    decisions = decisions.map((d) => {
+      const undoD = preFollowUp.undoneDecisionDates.get(d.id);
+      return undoD ? { ...d, undoneOnDate: undoD } : d;
+    });
+    sim = runSimulation(seed, decisions, LIVE_END_DATE);
+  }
 
   const openSituations = new Map<string, InternalSituation>();
+  const deferredSituations = new Map<string, DeferredSituationState>();
+  const dismissedSituations = new Set<string>();
+  const approvedSituations = new Set<string>();
+  const handledRolloutIds = new Set<string>();
   const openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
   const activeEpisodeSituation = new Map<string, string>();
   const letGoMap = new Map<string, NoticedAndLetGoItem>();
@@ -411,12 +520,85 @@ export async function evaluateStage2UpToDay(params: {
 
   let pendingSituation: RaisedItem | undefined;
   let lastTodayCandidates: Candidate[] = [];
+  const emittedFollowUpIds = new Set<string>();
 
   for (let i = 0; i <= clampedTarget; i++) {
     const date = sim.liveDates[i];
+
+    // Process any reactions on this day
+    for (const r of reactions) {
+      if (r.date !== date) continue;
+      if (r.candidateId.startsWith('rollout:') && (r.reaction === 'approve' || r.reaction === 'dismiss')) {
+        handledRolloutIds.add(r.candidateId);
+      }
+      if (r.reaction === 'approve') {
+        approvedSituations.add(r.candidateId);
+        deferredSituations.delete(r.candidateId);
+        openSituations.delete(r.candidateId);
+        allTrace.push({
+          id: `trace:${date}:mgr:react:${r.id}`,
+          date,
+          lane: 'manager',
+          kind: 'note',
+          headline: `Owner approved: ${r.candidateId}`,
+          detail: r.detail ?? `Approved by owner on ${formatShortDate(date)}.`,
+          outcome: 'raised',
+        });
+      } else if (r.reaction === 'dismiss') {
+        dismissedSituations.add(r.candidateId);
+        deferredSituations.delete(r.candidateId);
+        openSituations.delete(r.candidateId);
+        allTrace.push({
+          id: `trace:${date}:mgr:react:${r.id}`,
+          date,
+          lane: 'manager',
+          kind: 'note',
+          headline: `Owner dismissed (${(r.reason ?? 'other').replace(/_/g, ' ')})`,
+          detail: `${r.candidateId} dismissed by owner on ${formatShortDate(date)}.`,
+          outcome: 'let_go',
+        });
+      } else if (r.reaction === 'not_now') {
+        const sit = openSituations.get(r.candidateId);
+        deferredSituations.set(r.candidateId, {
+          deferredOn: date,
+          evidenceCountAtDefer: sit ? sit.evidence.size : 0,
+          consecutiveLostDaysAfterDefer: 0,
+        });
+        if (sit) sit.deferredOn = date;
+        allTrace.push({
+          id: `trace:${date}:mgr:react:${r.id}`,
+          date,
+          lane: 'manager',
+          kind: 'note',
+          headline: `Owner deferred (Not now): ${sit?.title ?? r.candidateId}`,
+          detail: `Card hidden on ${formatShortDate(date)}; continuing to check daily and will re-raise if it worsens.`,
+          outcome: 'info',
+        });
+      }
+    }
+
+    // Evaluate active actions/proofs & derive held-out control stores for `date`
+    const dayFollowUp = evaluateActionsUpToDate({
+      sim,
+      decisions,
+      date,
+      handledRolloutIds,
+    });
+    for (const ft of dayFollowUp.traceEntries) {
+      if (ft.date === date && !emittedFollowUpIds.has(ft.id)) {
+        emittedFollowUpIds.add(ft.id);
+        allTrace.push(ft);
+      }
+    }
+
+    const effectiveControlStores = new Set<string>([
+      ...baseControlStores,
+      ...dayFollowUp.activeControlStores,
+    ]);
+
     const rawCandidates = runDetectorsForDay(sim, date);
     const todayCandidates = rawCandidates.map((rc) =>
-      applySilenceChecks(rc, sim, date, decisions, controlStores),
+      applySilenceChecks(rc, sim, date, decisions, effectiveControlStores),
     );
     if (i === clampedTarget) {
       lastTodayCandidates = todayCandidates;
@@ -591,6 +773,7 @@ export async function evaluateStage2UpToDay(params: {
 
     for (const [grpId, members] of pendingStockByGroup.entries()) {
       const key = `situation:stock_running_out:${grpId}`;
+      if (dismissedSituations.has(key) || approvedSituations.has(key)) continue;
       const weekKey = getIsoWeekKey(date);
       const letGoKey = `${key}:letgo:${weekKey}`;
       if (letGoMap.has(letGoKey)) continue;
@@ -629,6 +812,7 @@ export async function evaluateStage2UpToDay(params: {
     }
 
     for (const cand of pendingOther) {
+      if (dismissedSituations.has(cand.id) || approvedSituations.has(cand.id)) continue;
       const weekKey = getIsoWeekKey(date);
       const checkSuffix = cand.explainedBy ? cand.explainedBy.check : 'instinct';
       const letGoId = `${cand.id}:letgo:${checkSuffix}:${weekKey}`;
@@ -674,7 +858,7 @@ export async function evaluateStage2UpToDay(params: {
         openSituations: openListForBrief,
         letGoSummaries,
         decisions,
-        controlStores,
+        controlStores: effectiveControlStores,
       });
 
       if (batch.errorNotice) {
@@ -690,12 +874,22 @@ export async function evaluateStage2UpToDay(params: {
         });
       }
 
-      // Per-request summary in Manager trace
-      const perCandLines = subjectsToAsk.map((subj) => {
+      // Per-request structured decision rows in Manager trace
+      const decisionRows: DecisionTraceRow[] = subjectsToAsk.map((subj) => {
         const out = batch.outcomes.get(subj.key);
-        if (!out) return `${subj.title}: no answer`;
-        return `${subj.title} -> ${out.choice} (conf ${out.confidence.toFixed(2)}, explained ${out.explainedProb.toFixed(2)}, urgency: ${out.urgencyLevel})`;
+        return {
+          candidateId: subj.key,
+          title: subj.title,
+          choice: out?.choice ?? 'keep_watching',
+          confidence: out?.confidence ?? 0.5,
+          explainedProb: out?.explainedProb ?? 0.5,
+          urgencyLevel: out?.urgencyLevel,
+        };
       });
+      const perCandLines = decisionRows.map(
+        (r) =>
+          `${r.title}: ${r.choice.replace(/_/g, ' ')} (conf ${r.confidence.toFixed(2)}, explained ${r.explainedProb.toFixed(2)})`,
+      );
 
       const batchModeLabel = batch.mode === 'fallback' ? 'fallback, Gemini not used' : batch.mode;
       allTrace.push({
@@ -703,16 +897,18 @@ export async function evaluateStage2UpToDay(params: {
         date,
         lane: 'manager',
         kind: 'decision',
-        headline: `Decision request (${batch.questionCount} questions, ${batch.latencyMs} ms)`,
-        detail: `${batch.model} (${batchModeLabel}) · ${perCandLines.join(' | ')}`,
+        headline: `Decision request (${batch.questionCount} questions, ${batch.latencyMs} ms${batch.mode === 'replayed' ? ', replayed' : ''})`,
+        detail: `${batch.model} (${batchModeLabel})`,
         outcome: Array.from(batch.outcomes.values()).some((o) => o.action === 'raise')
           ? 'raised'
           : 'let_go',
+        decisionRows,
         meta: {
           model: batch.model,
           mode: batch.mode,
           latencyMs: batch.latencyMs,
           questionCount: batch.questionCount,
+          briefingSnippet: perCandLines.join(' · '),
         },
       });
 
@@ -966,6 +1162,7 @@ export async function evaluateStage2UpToDay(params: {
             situation: snap,
             sim,
             date,
+            controlStores: effectiveControlStores,
           });
           completedInvestigations.set(newSit.id, inv);
           newSit.investigation = inv;
@@ -1110,17 +1307,83 @@ export async function evaluateStage2UpToDay(params: {
           );
         }
       }
+      // Check if any deferred ("Not now") situation has worsened on `date`
+      const deferredState = deferredSituations.get(sit.id);
+      if (deferredState && date > deferredState.deferredOn) {
+        let worsenedReason: string | null = null;
+        if (sit.evidence.size > deferredState.evidenceCountAtDefer) {
+          worsenedReason = 'New supporting evidence linked';
+        } else if (
+          sit.detectorKind === 'stock_running_out' &&
+          (sit.groupId === 'best_sellers' || sit.groupId === 'knitwear')
+        ) {
+          const storeIds = Array.from(sit.stores.keys());
+          const dayRecs = sim.storeRecordsByDate[date];
+          const lostToday = storeIds.reduce((s, sid) => {
+            const g = dayRecs[sid].groups[sit.groupId as 'best_sellers' | 'knitwear'];
+            return s + Math.max(0, g.potentialSales - g.actualSales);
+          }, 0);
+          if (lostToday > 0.01) {
+            deferredState.consecutiveLostDaysAfterDefer += 1;
+          } else {
+            deferredState.consecutiveLostDaysAfterDefer = 0;
+          }
+          if (deferredState.consecutiveLostDaysAfterDefer >= 3) {
+            worsenedReason = 'Sales actually lost for 3 days running';
+          }
+        }
+
+        if (worsenedReason) {
+          deferredSituations.delete(sit.id);
+          sit.reRaisedOn = date;
+          sit.reRaiseReason = worsenedReason;
+          allTrace.push({
+            id: `trace:${date}:mgr:reraise:${sit.id}`,
+            date,
+            lane: 'manager',
+            kind: 'note',
+            headline: `Re-raised (worsened): ${sit.title}`,
+            detail: `${worsenedReason} since deferred on ${formatShortDate(deferredState.deferredOn)}.`,
+            outcome: 'raised',
+          });
+        }
+      }
     }
   }
 
   const targetDate = sim.liveDates[clampedTarget];
-  const raisedSnapshot: RaisedItem[] = Array.from(openSituations.values())
-    .map((sit) => buildRaisedItemSnapshot(sit, targetDate, sim))
-    .sort((a, b) => {
-      const stakeB = (b.todayStakePerWeek ?? b.stakePerWeek).value;
-      const stakeA = (a.todayStakePerWeek ?? a.stakePerWeek).value;
-      return stakeB - stakeA;
-    });
+  const finalFollowUp = evaluateActionsUpToDate({
+    sim,
+    decisions,
+    date: targetDate,
+    handledRolloutIds,
+  });
+
+  // Include Gateway trace entries on or before targetDate
+  const gatewayLogs = getGatewayAttemptLog().filter((g) => g.date <= targetDate);
+  const existingTraceIds = new Set(allTrace.map((t) => t.id));
+  for (const g of gatewayLogs) {
+    if (!existingTraceIds.has(g.id)) {
+      allTrace.push(g);
+    }
+  }
+
+  const visibleOpenSituations = Array.from(openSituations.values()).filter(
+    (sit) => !deferredSituations.has(sit.id) && !approvedSituations.has(sit.id) && !dismissedSituations.has(sit.id),
+  );
+
+  const visibleRolloutCards = finalFollowUp.rolloutCards.filter(
+    (rc) => !deferredSituations.has(rc.candidateId) && !dismissedSituations.has(rc.candidateId) && !approvedSituations.has(rc.candidateId),
+  );
+
+  const raisedSnapshot: RaisedItem[] = [
+    ...visibleOpenSituations.map((sit) => buildRaisedItemSnapshot(sit, targetDate, sim)),
+    ...visibleRolloutCards,
+  ].sort((a, b) => {
+    const stakeB = (b.todayStakePerWeek ?? b.stakePerWeek).value;
+    const stakeA = (a.todayStakePerWeek ?? a.stakePerWeek).value;
+    return stakeB - stakeA;
+  });
 
   const chartPoints = sim.liveDates.slice(0, clampedTarget + 1).map((d) => {
     const cr = sim.chainRecordsByDate[d];
@@ -1187,12 +1450,15 @@ export async function evaluateStage2UpToDay(params: {
       chartPoints,
       headlineFacts,
       raised: raisedSnapshot,
+      inProgress: finalFollowUp.inProgress,
+      doneForYou: finalFollowUp.doneForYou,
       noticedAndLetGo: noticedList,
       groupedLetGo: buildGroupedLetGo(noticedList),
       trace: allTrace.slice().reverse(),
       todayCandidates: lastTodayCandidates,
       watcherEvalLog,
       pendingInvestigationId: pendingSituation?.candidateId,
+      reactions: reactions.filter((r) => r.date <= targetDate),
     },
     sim,
     pendingSituation,

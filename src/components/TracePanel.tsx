@@ -47,6 +47,26 @@ function ModeTag({ mode }: { mode?: 'live' | 'replayed' | 'fallback' }) {
   );
 }
 
+function DecisionChoiceTag({ choice }: { choice: 'raise_now' | 'keep_watching' | 'stay_quiet' }) {
+  const styles =
+    choice === 'raise_now'
+      ? 'bg-[#FEF3C7] text-[#B45309] border-[#FDE68A]'
+      : choice === 'keep_watching'
+        ? 'bg-[#EEF2FF] text-[#312E81] border-[#C7D2FE]'
+        : 'bg-[#F3F0EA] text-[#57534E] border-[#E6E1D8]';
+  const label =
+    choice === 'raise_now'
+      ? 'raise'
+      : choice === 'keep_watching'
+        ? 'keep watching'
+        : 'stay quiet';
+  return (
+    <span className={`inline-block px-1.5 py-0.5 text-[10px] font-mono rounded border ${styles}`}>
+      {label}
+    </span>
+  );
+}
+
 export function TracePanel({ trace, telemetry, onInspectFact, onOpenDevPage }: TracePanelProps) {
   const managerEntries = trace.filter((t) => t.lane === 'manager');
   const dsEntries = trace.filter((t) => t.lane === 'data_scientist');
@@ -112,11 +132,37 @@ export function TracePanel({ trace, telemetry, onInspectFact, onOpenDevPage }: T
                       {entry.meta.model && <span>{entry.meta.model}</span>}
                       <ModeTag mode={entry.meta.mode} />
                       {typeof entry.meta.latencyMs === 'number' && (
-                        <span>{entry.meta.latencyMs} ms</span>
+                        <span>
+                          {entry.meta.latencyMs} ms
+                          {entry.meta.mode === 'replayed' ? ' (replayed)' : ''}
+                        </span>
                       )}
                     </div>
                   )}
                   <p className="mt-1 text-[#57534E] leading-relaxed">{entry.detail}</p>
+
+                  {entry.decisionRows && entry.decisionRows.length > 0 && (
+                    <ul className="mt-2 space-y-1.5 bg-[#FAF8F5] border border-[#F3F0EA] rounded-lg p-2">
+                      {entry.decisionRows.map((row) => (
+                        <li
+                          key={row.candidateId}
+                          className="flex flex-col gap-0.5 text-[11px] pb-1 border-b border-[#E6E1D8] last:border-b-0 last:pb-0"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium text-[#171717] truncate">
+                              {row.title}
+                            </span>
+                            <DecisionChoiceTag choice={row.choice} />
+                          </div>
+                          <span className="font-mono text-[10px] text-[#78716C] tabular-nums">
+                            conf {row.confidence.toFixed(2)} · explained{' '}
+                            {row.explainedProb.toFixed(2)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
                   {entry.facts && entry.facts.length > 0 && (
                     <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[#78716C]">
                       {entry.facts.map((f) => (
@@ -160,7 +206,10 @@ export function TracePanel({ trace, telemetry, onInspectFact, onOpenDevPage }: T
                       {entry.meta.model && <span>{entry.meta.model}</span>}
                       <ModeTag mode={entry.meta.mode} />
                       {typeof entry.meta.latencyMs === 'number' && (
-                        <span>{entry.meta.latencyMs} ms</span>
+                        <span>
+                          {entry.meta.latencyMs} ms
+                          {entry.meta.mode === 'replayed' ? ' (replayed)' : ''}
+                        </span>
                       )}
                     </div>
                   )}

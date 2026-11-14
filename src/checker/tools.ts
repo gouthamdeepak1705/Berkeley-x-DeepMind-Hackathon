@@ -9,6 +9,7 @@ import { runSimulation, SimulationRun } from '../engine/simulation';
 import { ESTABLISHED_STORES, STORE_MAP, STORES } from '../engine/stores';
 import { InteractionToolDecl } from '../gemini/client';
 import { Fact, ProductGroupId, RaisedItem, RefundRecord, StoreId } from '../types/domain';
+import { buildTransferPlanForGroup } from './transferPlan';
 
 const refundWindowCache = new Map<string, RefundRecord[]>();
 
@@ -207,6 +208,23 @@ export const CHECKER_TOOL_DECLARATIONS: InteractionToolDecl[] = [
         store_id: {
           type: 'string',
           description: 'Optional store id; omit to aggregate across all stores short of that group.',
+        },
+      },
+      required: ['group_id'],
+    },
+  },
+  {
+    type: 'function',
+    name: 'compute_transfer_plan',
+    description:
+      'Build a safe inter-store stock transfer plan covering stores below 2.5 weeks (or projected below 2.5 weeks within 7 days), holding out the smallest store when 3+ stores need stock, and respecting donor 8-week and next-delivery+1-week limits.',
+    parameters: {
+      type: 'object',
+      properties: {
+        group_id: {
+          type: 'string',
+          enum: ['best_sellers', 'knitwear'],
+          description: 'Product group for transfer planning.',
         },
       },
       required: ['group_id'],
@@ -838,6 +856,30 @@ export function executeCheckerTool(
         short_stores: shortStores,
         donor_stores: donorStores,
         next_delivery_date: nextDel?.date ?? null,
+      },
+    };
+  }
+
+  if (toolName === 'compute_transfer_plan') {
+    const groupId = getValidGroupId(args.group_id ?? situation?.groupId);
+    const { plan, facts } = buildTransferPlanForGroup({
+      sim,
+      date: safeDate,
+      groupId,
+    });
+    return {
+      toolName,
+      argsSummary: `group_id=${groupId}`,
+      facts,
+      payload: {
+        facts,
+        treated_stores: plan.treatedStoreIds,
+        holdout_store: plan.holdoutStoreId ?? null,
+        holdout_sentence: plan.holdoutSentence ?? null,
+        limit_sentence: plan.limitSentence,
+        arrival_date: plan.arrivalDate,
+        shortfall_units: plan.shortfallUnitsFact?.value ?? 0,
+        transfer_lines: plan.transferLines,
       },
     };
   }

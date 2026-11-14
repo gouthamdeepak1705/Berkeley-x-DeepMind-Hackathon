@@ -23,7 +23,9 @@ import {
   RaisedItem,
   TextSegment,
 } from '../types/domain';
+import { runSecondCheck } from './secondCheck';
 import { CHECKER_TOOL_DECLARATIONS, executeCheckerTool } from './tools';
+import { buildTransferPlanForGroup } from './transferPlan';
 
 export interface InvestigationStreamEvent {
   type: 'started' | 'tool_call' | 'tool_result' | 'structured' | 'done';
@@ -205,33 +207,7 @@ function buildCodeFallbackInvestigation(
     );
   }
 
-  const calFact = Object.values(factsById).find((f) => f.id.startsWith('tool:calendar:'));
-  const mixFact = Object.values(factsById).find((f) => f.id.startsWith('tool:mix:new_stores_sales:'));
-  const faultFact = Object.values(factsById).find((f) => f.id.startsWith('tool:data_fault:'));
-
-  const ruledOut: InvestigationRuledOut[] = [
-    {
-      kind: 'calendar',
-      label: 'Calendar',
-      ruledOut: true,
-      summary: calFact?.note ?? 'No calendar shift explains the gap.',
-      fact: calFact,
-    },
-    {
-      kind: 'store_mix',
-      label: 'Store mix',
-      ruledOut: true,
-      summary: mixFact?.note ?? 'New stores add to total sales rather than causing this gap.',
-      fact: mixFact,
-    },
-    {
-      kind: 'data_fault',
-      label: 'Data fault',
-      ruledOut: true,
-      summary: faultFact?.note ?? 'No missing or duplicated days detected.',
-      fact: faultFact,
-    },
-  ];
+  const ruledOut = buildRuledOutSentences(factsById);
 
   const isStock = situation.detectorKind === 'stock_running_out';
   const isRefunds = situation.detectorKind === 'refunds_out_of_line';
@@ -274,34 +250,34 @@ function buildCodeFallbackInvestigation(
     findingSegments = [
       {
         type: 'text',
-        text: `${grp === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} cover at ${storeNames} has dropped to `,
+        text: `${grp === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} cover at ${storeNames} fell to `,
       },
       { type: 'fact', fact: situation.actual },
-      { type: 'text', text: ', putting ' },
+      { type: 'text', text: ', risking ' },
       { type: 'fact', fact: situation.stakePerWeek },
-      { type: 'text', text: ' per week at risk.' },
+      { type: 'text', text: '/wk.' },
     ];
     causeSegments = surplusFact && surplusFact.value > 0
       ? [
-          { type: 'text', text: 'Supplier replenishment is stalled while ' },
+          { type: 'text', text: 'Supplier delivery is delayed while ' },
           { type: 'fact', fact: surplusFact },
-          { type: 'text', text: ' of idle surplus sit in donor stores.' },
+          { type: 'text', text: ' of spare stock sit at donor stores.' },
         ]
       : [
-          { type: 'text', text: 'Stock has depleted below the ' },
+          { type: 'text', text: 'Cover fell below the ' },
           { type: 'fact', fact: situation.expected },
-          { type: 'text', text: ' safety cover threshold with no immediate supplier delivery.' },
+          { type: 'text', text: ' safety floor with no delivery near.' },
         ];
     proposalSegments = [
       {
         type: 'text',
         text:
           surplusFact && surplusFact.value > 0
-            ? 'Transfer surplus units from donor stores to protect '
-            : 'Hold out a control store and evaluate replenishment to protect ',
+            ? 'Transfer spare donor stock to protect '
+            : 'Reallocate available units to protect ',
       },
       { type: 'fact', fact: transferFact },
-      { type: 'text', text: ' per week.' },
+      { type: 'text', text: '/wk.' },
     ];
     options = [
       {
@@ -442,13 +418,95 @@ function buildCodeFallbackInvestigation(
   };
 }
 
+function buildRuledOutSentences(factsById: Record<string, Fact>): InvestigationRuledOut[] {
+  const calFact = Object.values(factsById).find((f) => f.id.startsWith('tool:calendar:'));
+  const estMixFact = Object.values(factsById).find((f) => f.id.startsWith('tool:mix:est_yoy:'));
+  const newMixFact = Object.values(factsById).find((f) => f.id.startsWith('tool:mix:new_stores_sales:'));
+  const faultFact = Object.values(factsById).find((f) => f.id.startsWith('tool:data_fault:'));
+
+  const calSegments: TextSegment[] = calFact
+    ? calFact.value === 0
+      ? [
+          { type: 'text', text: 'Calendar: no event or season change explains this week (' },
+          { type: 'fact', fact: calFact },
+          { type: 'text', text: ' shifts).' },
+        ]
+      : [
+          { type: 'text', text: 'Calendar: expectations already adjust for active calendar shifts (' },
+          { type: 'fact', fact: calFact },
+          { type: 'text', text: ' overlapping).' },
+        ]
+    : [{ type: 'text', text: 'Calendar: no event or season change explains this week.' }];
+
+  const mixFactToUse = estMixFact ?? newMixFact;
+  const mixSegments: TextSegment[] = estMixFact
+    ? estMixFact.value >= 0
+      ? [
+          { type: 'text', text: 'Store mix: established stores alone are up (' },
+          { type: 'fact', fact: estMixFact },
+          { type: 'text', text: '), so new stores are not the cause.' },
+        ]
+      : [
+          { type: 'text', text: 'Store mix: established stores alone are down (' },
+          { type: 'fact', fact: estMixFact },
+          { type: 'text', text: '), not a new-store mix artifact.' },
+        ]
+    : newMixFact
+      ? [
+          { type: 'text', text: 'Store mix: new stores added ' },
+          { type: 'fact', fact: newMixFact },
+          { type: 'text', text: ', so they do not explain this issue.' },
+        ]
+      : [{ type: 'text', text: 'Store mix: new stores do not explain this issue.' }];
+
+  const faultSegments: TextSegment[] = faultFact
+    ? [
+        { type: 'text', text: 'Data fault: no missing or repeated days (' },
+        { type: 'fact', fact: faultFact },
+        { type: 'text', text: ' anomalies found).' },
+      ]
+    : [{ type: 'text', text: 'Data fault: no missing or repeated days.' }];
+
+  const toText = (segs: TextSegment[]) =>
+    segs.map((s) => (s.type === 'text' ? s.text : s.fact.formatted)).join('');
+
+  return [
+    {
+      kind: 'calendar',
+      label: 'Calendar',
+      ruledOut: true,
+      summary: toText(calSegments),
+      summarySegments: calSegments,
+      fact: calFact,
+    },
+    {
+      kind: 'store_mix',
+      label: 'Store mix',
+      ruledOut: true,
+      summary: toText(mixSegments),
+      summarySegments: mixSegments,
+      fact: mixFactToUse,
+    },
+    {
+      kind: 'data_fault',
+      label: 'Data fault',
+      ruledOut: true,
+      summary: toText(faultSegments),
+      summarySegments: faultSegments,
+      fact: faultFact,
+    },
+  ];
+}
+
 export async function runSituationInvestigation(params: {
   situation: RaisedItem;
   sim: SimulationRun;
   date: string;
+  controlStores?: Set<string>;
+  bypassCache?: boolean;
   onEvent?: (ev: InvestigationStreamEvent) => void;
 }): Promise<InvestigationResult> {
-  const { situation, sim, date, onEvent } = params;
+  const { situation, sim, date, controlStores = new Set(), bypassCache = false, onEvent } = params;
   const jobKey = selectInvestigationJob(situation);
   const cfg = GEMINI_SETTINGS.jobs[jobKey];
   const factsById = seedFactsFromSituation(situation);
@@ -458,6 +516,35 @@ export async function runSituationInvestigation(params: {
     type: 'started',
     message: `Noticed: ${situation.title}. Checking now.`,
   });
+
+  const transferPlanResult =
+    situation.detectorKind === 'stock_running_out'
+      ? buildTransferPlanForGroup({
+          sim,
+          date,
+          groupId: situation.groupId === 'knitwear' ? 'knitwear' : 'best_sellers',
+          controlStores,
+        })
+      : null;
+  if (transferPlanResult) {
+    for (const f of transferPlanResult.facts) {
+      factsById[f.id] = f;
+    }
+  }
+
+  const runSecondCheckStep = async () => {
+    onEvent?.({
+      type: 'tool_call',
+      message: 'Running second check in Python (code execution)...',
+    });
+    return runSecondCheck({
+      situation,
+      sim,
+      date,
+      firstValueFact: situation.stakePerWeek,
+      bypassCache,
+    });
+  };
 
   if (!getApiKey() || isCapReached(cfg.capBucket)) {
     recordGeminiCall({
@@ -470,6 +557,7 @@ export async function runSituationInvestigation(params: {
       mode: 'fallback',
       error: !getApiKey() ? 'No GEMINI_API_KEY configured' : 'Daily cap reached',
     });
+    const secondCheck = await runSecondCheckStep();
     const fallback = buildCodeFallbackInvestigation(
       situation,
       sim,
@@ -481,6 +569,8 @@ export async function runSituationInvestigation(params: {
       0,
       true,
     );
+    fallback.secondCheck = secondCheck;
+    fallback.transferPlan = transferPlanResult?.plan;
     onEvent?.({ type: 'done', message: 'Fallback investigation ready.', result: fallback });
     return fallback;
   }
@@ -524,10 +614,10 @@ export async function runSituationInvestigation(params: {
     }
 
     const timeoutMs = mIdx === 0 ? cfg.firstTimeoutMs : cfg.fallbackTimeoutMs;
-    const modelStart = Date.now();
     const localFacts: Record<string, Fact> = { ...factsById };
     const toolTrace: InvestigationToolTrace[] = [];
     let anyLive = false;
+    let totalModelLatencyMs = 0;
 
     try {
       let resp = await callInteractionRaw({
@@ -540,6 +630,7 @@ export async function runSituationInvestigation(params: {
         timeoutMs,
       });
       if (resp.mode === 'live') anyLive = true;
+      totalModelLatencyMs += resp.latencyMs;
 
       let round = 0;
       while (round < GEMINI_SETTINGS.checkerLimits.maxToolRounds) {
@@ -594,6 +685,7 @@ export async function runSituationInvestigation(params: {
           timeoutMs,
         });
         if (resp.mode === 'live') anyLive = true;
+        totalModelLatencyMs += resp.latencyMs;
       }
 
       // Ensure all gathered facts are clearly summarized for the structured output step
@@ -601,16 +693,18 @@ export async function runSituationInvestigation(params: {
         .map((f) => `- {{${f.id}}}: ${f.label} = ${f.formatted} (${f.note})`)
         .join('\n');
 
+      const maxWords = GEMINI_SETTINGS.checkerLimits.maxProseWords;
       const buildStructuredPrompt = (extraError?: string) =>
         [
           'Produce the final structured investigation JSON.',
           'CRITICAL RULES:',
-          '- Every template (`finding_template`, `cause_template`, `proposal_template`) MUST be exactly one calm sentence.',
+          `- Each of finding_template, cause_template, and proposal_template MUST be 25 words or fewer (strict cap: <= ${maxWords} words each), one calm sentence, one single idea each.`,
+          '- Keep the finding focused strictly on the raised situation itself — do NOT mix unrelated metrics (such as new-store total sales) into a stock finding.',
           '- NEVER type any digits 0-9 anywhere in `finding_template`, `cause_template`, or `proposal_template` outside `{{fact_id}}` placeholders (for example write "three stores", "eight weeks", "late evening", not digits!).',
           '- Every `{{fact_id}}` placeholder MUST come verbatim from the gathered fact catalog below.',
           '- `ruled_out` MUST include all 3 items: `calendar`, `store_mix`, `data_fault`, each with its gathered `fact_id`.',
           '- `options` MUST always include a `do_nothing` option (`is_do_nothing: true`).',
-          '- For Best-sellers / stock shortages, explicitly mention donor stores holding idle surplus if present in the gathered facts, and note if new stores keep total all-store sales positive while like-for-like established stores fell.',
+          '- For stock shortages, mention donor stores holding spare stock if present in the gathered facts.',
           extraError ? `\nFix this issue from your previous draft: ${extraError}` : '',
           '\nGathered Fact Catalog:',
           factCatalog,
@@ -666,13 +760,19 @@ export async function runSituationInvestigation(params: {
       for (let attempt = 0; attempt <= GEMINI_SETTINGS.checkerLimits.maxPlaceholderRetries; attempt++) {
         const sRes = await callStructuredStep(buildStructuredPrompt(extraRetryNote), attempt === 0);
         if (sRes.mode === 'live') anyLive = true;
+        totalModelLatencyMs += sRes.latencyMs;
         const candidateJson = JSON.parse(sRes.output_text) as StructuredInvestigationPayload;
 
         const cFinding = validateAndResolvePlaceholders(candidateJson.finding_template, localFacts);
         const cCause = validateAndResolvePlaceholders(candidateJson.cause_template, localFacts);
         const cProposal = validateAndResolvePlaceholders(candidateJson.proposal_template, localFacts);
 
-        if (cFinding.ok && cCause.ok && cProposal.ok) {
+        const withinWordCap =
+          cFinding.wordCount <= maxWords &&
+          cCause.wordCount <= maxWords &&
+          cProposal.wordCount <= maxWords;
+
+        if (cFinding.ok && cCause.ok && cProposal.ok && withinWordCap) {
           parsedPayload = candidateJson;
           findingSegments = cFinding.segments;
           causeSegments = cCause.segments;
@@ -685,6 +785,9 @@ export async function runSituationInvestigation(params: {
         if (cFinding.hasTypedDigits || cCause.hasTypedDigits || cProposal.hasTypedDigits) {
           issues.push('Remove ALL typed digits 0-9 outside {{fact_id}} placeholders (write counts like "three" or "two" in words, or use {{fact_id}}).');
         }
+        if (!withinWordCap) {
+          issues.push(`Shorten finding (${cFinding.wordCount}w), cause (${cCause.wordCount}w), and proposal (${cProposal.wordCount}w) so EACH is at most ${maxWords} words.`);
+        }
         const missingAll = [...cFinding.missingIds, ...cCause.missingIds, ...cProposal.missingIds];
         if (missingAll.length > 0) {
           issues.push(`Replace unknown placeholders [${missingAll.join(', ')}] with valid IDs from the Gathered Fact Catalog.`);
@@ -692,7 +795,8 @@ export async function runSituationInvestigation(params: {
         extraRetryNote = issues.join(' ');
       }
 
-      const totalLatency = Math.max(1, Date.now() - modelStart);
+      const secondCheck = await runSecondCheckStep();
+      const totalLatency = Math.max(1, totalModelLatencyMs);
       const finalMode: 'live' | 'replayed' = anyLive ? 'live' : 'replayed';
 
       if (!validationOk || !parsedPayload) {
@@ -707,32 +811,14 @@ export async function runSituationInvestigation(params: {
           totalLatency,
           true,
         );
+        codeFallback.secondCheck = secondCheck;
+        codeFallback.transferPlan = transferPlanResult?.plan;
         onEvent?.({ type: 'done', message: 'Investigation verified with code wording.', result: codeFallback });
         return codeFallback;
       }
 
-      // Normalize ruled_out to always cover calendar, store_mix, data_fault
-      const ruledOutKinds: Array<'calendar' | 'store_mix' | 'data_fault'> = [
-        'calendar',
-        'store_mix',
-        'data_fault',
-      ];
-      const ruledOutLabels: Record<'calendar' | 'store_mix' | 'data_fault', string> = {
-        calendar: 'Calendar',
-        store_mix: 'Store mix',
-        data_fault: 'Data fault',
-      };
-      const ruledOut: InvestigationRuledOut[] = ruledOutKinds.map((kind) => {
-        const match = parsedPayload!.ruled_out.find((r) => r.kind === kind);
-        const fact = match?.fact_id ? localFacts[match.fact_id] : undefined;
-        return {
-          kind,
-          label: ruledOutLabels[kind],
-          ruledOut: match?.ruled_out ?? true,
-          summary: match?.summary ?? `${ruledOutLabels[kind]} checked and ruled out.`,
-          fact,
-        };
-      });
+      // Build plain English Ruled Out sentences from gathered computed facts
+      const ruledOut: InvestigationRuledOut[] = buildRuledOutSentences(localFacts);
 
       const options: InvestigationOption[] = parsedPayload.options.map((opt) => ({
         id: opt.id,
@@ -785,6 +871,8 @@ export async function runSituationInvestigation(params: {
         usedFallbackWording: false,
         toolTrace,
         factsById: localFacts,
+        secondCheck,
+        transferPlan: transferPlanResult?.plan,
       };
 
       onEvent?.({ type: 'done', message: 'Investigation complete.', result: finalResult });
@@ -798,6 +886,7 @@ export async function runSituationInvestigation(params: {
       if (mIdx === 0 && cfg.models.length > 1) {
         continue;
       }
+      const secondCheck = await runSecondCheckStep();
       const totalLatency = Math.max(1, Date.now() - startAll);
       const fallback = buildCodeFallbackInvestigation(
         situation,
@@ -810,11 +899,14 @@ export async function runSituationInvestigation(params: {
         totalLatency,
         true,
       );
+      fallback.secondCheck = secondCheck;
+      fallback.transferPlan = transferPlanResult?.plan;
       onEvent?.({ type: 'done', message: 'Investigation completed on code fallback.', result: fallback });
       return fallback;
     }
   }
 
+  const secondCheck = await runSecondCheckStep();
   const fallback = buildCodeFallbackInvestigation(
     situation,
     sim,
@@ -826,6 +918,8 @@ export async function runSituationInvestigation(params: {
     Math.max(1, Date.now() - startAll),
     true,
   );
+  fallback.secondCheck = secondCheck;
+  fallback.transferPlan = transferPlanResult?.plan;
   onEvent?.({ type: 'done', message: 'Investigation completed on code fallback.', result: fallback });
   return fallback;
 }
