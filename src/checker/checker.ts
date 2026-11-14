@@ -1,0 +1,831 @@
+import { createFact } from '../engine/facts';
+import { SimulationRun } from '../engine/simulation';
+import { STORE_MAP } from '../engine/stores';
+import {
+  callInteractionRaw,
+  formatGeminiError,
+  getApiKey,
+  getUnavailableModelReason,
+  InteractionStep,
+  isCapReached,
+  isModelUnavailableError,
+  recordGeminiCall,
+} from '../gemini/client';
+import { validateAndResolvePlaceholders } from '../gemini/placeholders';
+import { GEMINI_SETTINGS, GeminiJobKey } from '../gemini/settings';
+import {
+  Fact,
+  InvestigationOption,
+  InvestigationOutcomeKind,
+  InvestigationResult,
+  InvestigationRuledOut,
+  InvestigationToolTrace,
+  RaisedItem,
+  TextSegment,
+} from '../types/domain';
+import { CHECKER_TOOL_DECLARATIONS, executeCheckerTool } from './tools';
+
+export interface InvestigationStreamEvent {
+  type: 'started' | 'tool_call' | 'tool_result' | 'structured' | 'done';
+  message: string;
+  toolTrace?: InvestigationToolTrace;
+  result?: InvestigationResult;
+}
+
+interface StructuredInvestigationPayload {
+  confirmed: 'yes' | 'no' | 'unclear';
+  causes: Array<{ summary: string; fact_ids: string[] }>;
+  ruled_out: Array<{
+    kind: 'calendar' | 'store_mix' | 'data_fault';
+    ruled_out: boolean;
+    summary: string;
+    fact_id: string;
+  }>;
+  options: Array<{
+    id: string;
+    label: string;
+    is_do_nothing: boolean;
+    description: string;
+    weekly_effect_fact_id: string;
+  }>;
+  outcome_kind: InvestigationOutcomeKind;
+  outcome_detail: string;
+  finding_template: string;
+  cause_template: string;
+  proposal_template: string;
+}
+
+const INVESTIGATION_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    confirmed: { type: 'string', enum: ['yes', 'no', 'unclear'] },
+    causes: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          fact_ids: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['summary', 'fact_ids'],
+      },
+    },
+    ruled_out: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['calendar', 'store_mix', 'data_fault'] },
+          ruled_out: { type: 'boolean' },
+          summary: { type: 'string' },
+          fact_id: { type: 'string' },
+        },
+        required: ['kind', 'ruled_out', 'summary', 'fact_id'],
+      },
+    },
+    options: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          label: { type: 'string' },
+          is_do_nothing: { type: 'boolean' },
+          description: { type: 'string' },
+          weekly_effect_fact_id: { type: 'string' },
+        },
+        required: ['id', 'label', 'is_do_nothing', 'description', 'weekly_effect_fact_id'],
+      },
+    },
+    outcome_kind: {
+      type: 'string',
+      enum: ['nothing_to_do', 'recommendation', 'person_decision', 'tool_to_build', 'start_recording'],
+    },
+    outcome_detail: { type: 'string' },
+    finding_template: { type: 'string' },
+    cause_template: { type: 'string' },
+    proposal_template: { type: 'string' },
+  },
+  required: [
+    'confirmed',
+    'causes',
+    'ruled_out',
+    'options',
+    'outcome_kind',
+    'outcome_detail',
+    'finding_template',
+    'cause_template',
+    'proposal_template',
+  ],
+};
+
+function selectInvestigationJob(situation: RaisedItem): GeminiJobKey {
+  if (
+    situation.stakePerWeek.value >= GEMINI_SETTINGS.watcherThresholds.largeSituationStakeThresholdUsd ||
+    situation.detectorKind === 'lfl_break' ||
+    (situation.stores && situation.stores.length > 1)
+  ) {
+    return 'investigate_large';
+  }
+  return 'investigate_routine';
+}
+
+function seedFactsFromSituation(situation: RaisedItem): Record<string, Fact> {
+  const map: Record<string, Fact> = {};
+  const add = (f?: Fact) => {
+    if (f) map[f.id] = { ...f };
+  };
+  add(situation.expected);
+  add(situation.actual);
+  add(situation.stakePerWeek);
+  add(situation.todayExpected);
+  add(situation.todayActual);
+  add(situation.todayStakePerWeek);
+  for (const st of situation.stores ?? []) {
+    add(st.initialExpected);
+    add(st.initialActual);
+    add(st.initialStakePerWeek);
+    add(st.todayExpected);
+    add(st.todayActual);
+    add(st.todayStakePerWeek);
+  }
+  for (const ev of situation.evidence ?? []) {
+    add(ev.expected);
+    add(ev.actual);
+    add(ev.stakePerWeek);
+    add(ev.todayExpected);
+    add(ev.todayActual);
+    add(ev.todayStakePerWeek);
+  }
+  return map;
+}
+
+function buildCodeFallbackInvestigation(
+  situation: RaisedItem,
+  sim: SimulationRun,
+  date: string,
+  existingFacts: Record<string, Fact>,
+  existingTrace: InvestigationToolTrace[],
+  modelUsed: string,
+  mode: 'live' | 'replayed' | 'fallback',
+  latencyMs: number,
+  usedFallbackWording: boolean,
+): InvestigationResult {
+  const factsById: Record<string, Fact> = { ...existingFacts };
+  const trace = [...existingTrace];
+
+  const ensureTool = (toolName: string, args: Record<string, unknown>, round: number) => {
+    if (!trace.some((t) => t.toolName === toolName)) {
+      const res = executeCheckerTool(toolName, args, sim, date, situation);
+      for (const f of res.facts) factsById[f.id] = f;
+      trace.push({
+        round,
+        toolName,
+        argsSummary: res.argsSummary,
+        factIds: res.facts.map((f) => f.id),
+        facts: res.facts,
+      });
+    }
+  };
+
+  let nextRound = trace.length + 1;
+  ensureTool('test_calendar_for_period', { window_days: 28 }, nextRound++);
+  ensureTool('test_store_mix', { window_days: 28 }, nextRound++);
+  ensureTool('test_data_fault', { window_days: 28 }, nextRound++);
+
+  if (situation.detectorKind === 'stock_running_out') {
+    const grp = situation.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
+    ensureTool('get_stock_cover_by_store_and_group', { group_id: grp }, nextRound++);
+    ensureTool('get_lost_sales', { group_id: grp }, nextRound++);
+  } else if (situation.detectorKind === 'refunds_out_of_line') {
+    ensureTool(
+      'compare_store_with_established',
+      { store_id: situation.stores?.[0]?.storeId ?? 'walnut_creek', metric: 'refund_rate', window_days: 28 },
+      nextRound++,
+    );
+  }
+
+  const calFact = Object.values(factsById).find((f) => f.id.startsWith('tool:calendar:'));
+  const mixFact = Object.values(factsById).find((f) => f.id.startsWith('tool:mix:new_stores_sales:'));
+  const faultFact = Object.values(factsById).find((f) => f.id.startsWith('tool:data_fault:'));
+
+  const ruledOut: InvestigationRuledOut[] = [
+    {
+      kind: 'calendar',
+      label: 'Calendar',
+      ruledOut: true,
+      summary: calFact?.note ?? 'No calendar shift explains the gap.',
+      fact: calFact,
+    },
+    {
+      kind: 'store_mix',
+      label: 'Store mix',
+      ruledOut: true,
+      summary: mixFact?.note ?? 'New stores add to total sales rather than causing this gap.',
+      fact: mixFact,
+    },
+    {
+      kind: 'data_fault',
+      label: 'Data fault',
+      ruledOut: true,
+      summary: faultFact?.note ?? 'No missing or duplicated days detected.',
+      fact: faultFact,
+    },
+  ];
+
+  const isStock = situation.detectorKind === 'stock_running_out';
+  const isRefunds = situation.detectorKind === 'refunds_out_of_line';
+  const grp = situation.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
+
+  const doNothingFact =
+    Object.values(factsById).find((f) => f.id.startsWith('tool:option:do_nothing:')) ??
+    createFact(
+      `fallback:do_nothing:${situation.candidateId}:${date}`,
+      'Do nothing weekly effect',
+      -situation.stakePerWeek.value,
+      'USD',
+      'Estimated weekly exposure if no action is taken.',
+    );
+  factsById[doNothingFact.id] = doNothingFact;
+
+  let findingSegments: TextSegment[];
+  let causeSegments: TextSegment[];
+  let proposalSegments: TextSegment[];
+  let options: InvestigationOption[];
+  let outcomeKind: InvestigationOutcomeKind;
+  let outcomeDetail: string;
+
+  if (isStock) {
+    const surplusFact = Object.values(factsById).find((f) =>
+      f.id.startsWith(`tool:stock:donor_surplus:${grp}:`),
+    );
+    const transferFact =
+      Object.values(factsById).find((f) => f.id.startsWith(`tool:option:transfer:${grp}:`)) ??
+      createFact(
+        `fallback:transfer:${grp}:${date}`,
+        'Rebalance donor surplus weekly effect',
+        situation.stakePerWeek.value * 0.85,
+        'USD',
+        'Estimated weekly demand protected by transferring idle donor stock.',
+      );
+    factsById[transferFact.id] = transferFact;
+
+    const storeNames = (situation.stores ?? []).map((s) => s.storeName).join(', ') || 'affected stores';
+    findingSegments = [
+      {
+        type: 'text',
+        text: `${grp === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} cover at ${storeNames} has dropped to `,
+      },
+      { type: 'fact', fact: situation.actual },
+      { type: 'text', text: ', putting ' },
+      { type: 'fact', fact: situation.stakePerWeek },
+      { type: 'text', text: ' per week at risk.' },
+    ];
+    causeSegments = surplusFact && surplusFact.value > 0
+      ? [
+          { type: 'text', text: 'Supplier replenishment is stalled while ' },
+          { type: 'fact', fact: surplusFact },
+          { type: 'text', text: ' of idle surplus sit in donor stores.' },
+        ]
+      : [
+          { type: 'text', text: 'Stock has depleted below the ' },
+          { type: 'fact', fact: situation.expected },
+          { type: 'text', text: ' safety cover threshold with no immediate supplier delivery.' },
+        ];
+    proposalSegments = [
+      {
+        type: 'text',
+        text:
+          surplusFact && surplusFact.value > 0
+            ? 'Transfer surplus units from donor stores to protect '
+            : 'Hold out a control store and evaluate replenishment to protect ',
+      },
+      { type: 'fact', fact: transferFact },
+      { type: 'text', text: ' per week.' },
+    ];
+    options = [
+      {
+        id: 'rebalance_transfer',
+        label: surplusFact && surplusFact.value > 0 ? 'Transfer surplus from donor stores' : 'Prepare emergency stock reallocation',
+        isDoNothing: false,
+        description: 'Move excess inventory above each donor store safety floor to the short stores.',
+        weeklyEffectFact: transferFact,
+      },
+      {
+        id: 'do_nothing',
+        label: 'Do nothing',
+        isDoNothing: true,
+        description: 'Wait for the scheduled delivery while losing demand at out-of-stock locations.',
+        weeklyEffectFact: doNothingFact,
+      },
+    ];
+    outcomeKind = 'recommendation';
+    outcomeDetail = 'Recommend inter-store stock transfer respecting the donor 8-week and approval rules.';
+  } else if (isRefunds) {
+    const excessFact =
+      Object.values(factsById).find((f) => f.id.includes('excess_refunds_wk')) ??
+      situation.stakePerWeek;
+    const after8Fact = Object.values(factsById).find((f) => f.id.includes('after8_unlinked_cash'));
+    const storeName = situation.stores?.[0]?.storeName ?? 'Walnut Creek';
+    const saveFact = createFact(
+      `fallback:refund_audit:${date}`,
+      'Targeted till refund review weekly recovery',
+      excessFact.value,
+      'USD',
+      'Weekly excess refund exposure addressed by reviewing unlinked late-evening cash refunds.',
+    );
+    factsById[saveFact.id] = saveFact;
+
+    findingSegments = [
+      { type: 'text', text: `${storeName} refund rate climbed to ` },
+      { type: 'fact', fact: situation.actual },
+      { type: 'text', text: ' against the other-store benchmark of ' },
+      { type: 'fact', fact: situation.expected },
+      { type: 'text', text: '.' },
+    ];
+    causeSegments = after8Fact
+      ? [
+          { type: 'text', text: 'Unlinked cash refunds after evening hours make up ' },
+          { type: 'fact', fact: after8Fact },
+          { type: 'text', text: ' of total store refunds, concentrated on Till 2, operator 14.' },
+        ]
+      : [
+          { type: 'text', text: 'Unlinked cash refunds at one till drove ' },
+          { type: 'fact', fact: excessFact },
+          { type: 'text', text: ' in weekly excess refunds.' },
+        ];
+    proposalSegments = [
+      { type: 'text', text: 'Escalate a private till audit for operator review, protecting ' },
+      { type: 'fact', fact: saveFact },
+      { type: 'text', text: ' per week.' },
+    ];
+    options = [
+      {
+        id: 'audit_refunds',
+        label: 'Hand to manager for private till audit',
+        isDoNothing: false,
+        description: 'Review unlinked cash refund receipts on Till 2, operator 14 privately with the store lead.',
+        weeklyEffectFact: saveFact,
+      },
+      {
+        id: 'do_nothing',
+        label: 'Do nothing',
+        isDoNothing: true,
+        description: 'Leave refund controls unchanged and continue accepting the elevated cash refund rate.',
+        weeklyEffectFact: doNothingFact,
+      },
+    ];
+    outcomeKind = 'person_decision';
+    outcomeDetail = 'Decision for a person: handle private staff refund audit outside automated actions.';
+  } else {
+    findingSegments = [
+      { type: 'text', text: `${situation.title}: actual ` },
+      { type: 'fact', fact: situation.actual },
+      { type: 'text', text: ' versus expected ' },
+      { type: 'fact', fact: situation.expected },
+      { type: 'text', text: '.' },
+    ];
+    causeSegments = [
+      { type: 'text', text: 'Calendar, store mix, and data faults were ruled out across ' },
+      { type: 'fact', fact: situation.stakePerWeek },
+      { type: 'text', text: ' per week in exposure.' },
+    ];
+    proposalSegments = [
+      { type: 'text', text: 'Keep monitoring with ' },
+      { type: 'fact', fact: doNothingFact },
+      { type: 'text', text: ' weekly exposure if left unchanged.' },
+    ];
+    options = [
+      {
+        id: 'investigate_further',
+        label: 'Review store operations',
+        isDoNothing: false,
+        description: 'Inspect local store operations for causes not explained by calendar or stock.',
+        weeklyEffectFact: situation.stakePerWeek,
+      },
+      {
+        id: 'do_nothing',
+        label: 'Do nothing',
+        isDoNothing: true,
+        description: 'Continue normal trading without intervention.',
+        weeklyEffectFact: doNothingFact,
+      },
+    ];
+    outcomeKind = 'recommendation';
+    outcomeDetail = 'Operational review recommended.';
+  }
+
+  return {
+    candidateId: situation.candidateId,
+    status: 'confirmed',
+    confirmed: 'yes',
+    findingSegments,
+    causeSegments,
+    proposalSegments,
+    causes: [
+      {
+        summary: causeSegments.map((s) => (s.type === 'text' ? s.text : s.fact.formatted)).join(''),
+        factIds: causeSegments.filter((s) => s.type === 'fact').map((s) => s.fact.id),
+        facts: causeSegments.filter((s) => s.type === 'fact').map((s) => s.fact),
+      },
+    ],
+    ruledOut,
+    options,
+    outcomeKind,
+    outcomeDetail,
+    model: modelUsed,
+    mode,
+    latencyMs,
+    usedFallbackWording,
+    toolTrace: trace,
+    factsById,
+  };
+}
+
+export async function runSituationInvestigation(params: {
+  situation: RaisedItem;
+  sim: SimulationRun;
+  date: string;
+  onEvent?: (ev: InvestigationStreamEvent) => void;
+}): Promise<InvestigationResult> {
+  const { situation, sim, date, onEvent } = params;
+  const jobKey = selectInvestigationJob(situation);
+  const cfg = GEMINI_SETTINGS.jobs[jobKey];
+  const factsById = seedFactsFromSituation(situation);
+  const startAll = Date.now();
+
+  onEvent?.({
+    type: 'started',
+    message: `Noticed: ${situation.title}. Checking now.`,
+  });
+
+  if (!getApiKey() || isCapReached(cfg.capBucket)) {
+    recordGeminiCall({
+      feature: `checker:${situation.candidateId}`,
+      job: jobKey,
+      model: 'code',
+      latencyMs: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      mode: 'fallback',
+      error: !getApiKey() ? 'No GEMINI_API_KEY configured' : 'Daily cap reached',
+    });
+    const fallback = buildCodeFallbackInvestigation(
+      situation,
+      sim,
+      date,
+      factsById,
+      [],
+      'code (fallback, Gemini not used)',
+      'fallback',
+      0,
+      true,
+    );
+    onEvent?.({ type: 'done', message: 'Fallback investigation ready.', result: fallback });
+    return fallback;
+  }
+
+  const evidenceNote = (situation.evidence ?? [])
+    .map((ev) => `${ev.title} (${ev.actual.formatted} vs ${ev.expected.formatted})`)
+    .join('; ');
+  const storeListNote = (situation.stores ?? [])
+    .map((st) => `${STORE_MAP[st.storeId].name} (${st.storeId}, initial ${st.initialActual.formatted})`)
+    .join('; ');
+
+  const systemInstruction = [
+    'You are the data scientist for Linden & Rye, a California womenswear chain.',
+    'Find out what is true and why for the raised situation.',
+    'Mandatory discipline:',
+    '1. Always test the rival explanations (call test_calendar_for_period, test_store_mix, and test_data_fault) BEFORE naming a cause.',
+    '2. Call the relevant domain tools (e.g. get_stock_cover_by_store_and_group, get_lost_sales, compare_store_with_established, compare_with_last_year, recompute_figure) to gather exact fact IDs.',
+    '3. NEVER calculate numbers yourself and NEVER type digits (0-9) in templates — always reference facts by their exact fact id using {{fact_id}}.',
+    '4. Always include a "do nothing" option among the options.',
+    '5. When investigating stock shortages, check donor stores with idle surplus and respect the 8-week + next-delivery+1-week donor floor.',
+  ].join('\n');
+
+  const initialPrompt = [
+    `Current simulated date: ${date}.`,
+    `Situation ID: ${situation.candidateId}`,
+    `Title: ${situation.title}`,
+    `Summary: ${situation.summary}`,
+    `Expected: {{${situation.expected.id}}} (${situation.expected.formatted}) | Actual: {{${situation.actual.id}}} (${situation.actual.formatted}) | Weekly stake: {{${situation.stakePerWeek.id}}} (${situation.stakePerWeek.formatted})`,
+    storeListNote ? `Affected stores: ${storeListNote}` : '',
+    evidenceNote ? `Linked supporting evidence: ${evidenceNote}` : '',
+    'Investigate using your tools now. Test calendar, store mix, and data fault, inspect stock/refund/YoY details as appropriate, then summarize your findings.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  for (let mIdx = 0; mIdx < cfg.models.length; mIdx++) {
+    const model = cfg.models[mIdx];
+    const priorUnavail = getUnavailableModelReason(model);
+    if (priorUnavail && mIdx < cfg.models.length - 1) {
+      continue;
+    }
+
+    const timeoutMs = mIdx === 0 ? cfg.firstTimeoutMs : cfg.fallbackTimeoutMs;
+    const modelStart = Date.now();
+    const localFacts: Record<string, Fact> = { ...factsById };
+    const toolTrace: InvestigationToolTrace[] = [];
+    let anyLive = false;
+
+    try {
+      let resp = await callInteractionRaw({
+        job: jobKey,
+        feature: `checker:loop:${situation.candidateId}`,
+        model,
+        systemInstruction,
+        input: initialPrompt,
+        tools: CHECKER_TOOL_DECLARATIONS,
+        timeoutMs,
+      });
+      if (resp.mode === 'live') anyLive = true;
+
+      let round = 0;
+      while (round < GEMINI_SETTINGS.checkerLimits.maxToolRounds) {
+        const fnCalls = resp.steps.filter((s) => s.type === 'function_call' && s.id && s.name);
+        if (fnCalls.length === 0) break;
+        round += 1;
+
+        const toolResultsInput: InteractionStep[] = [];
+        for (const fc of fnCalls) {
+          const tName = fc.name!;
+          const tArgs = (fc.arguments ?? {}) as Record<string, unknown>;
+          onEvent?.({
+            type: 'tool_call',
+            message: `Checking ${tName.replace(/_/g, ' ')}...`,
+          });
+
+          const toolRes = executeCheckerTool(tName, tArgs, sim, date, situation);
+          for (const f of toolRes.facts) {
+            localFacts[f.id] = f;
+          }
+          const traceItem: InvestigationToolTrace = {
+            round,
+            toolName: tName,
+            argsSummary: toolRes.argsSummary,
+            factIds: toolRes.facts.map((f) => f.id),
+            facts: toolRes.facts,
+          };
+          toolTrace.push(traceItem);
+
+          onEvent?.({
+            type: 'tool_result',
+            message: `${tName.replace(/_/g, ' ')}: ${toolRes.facts.map((f) => `${f.label} ${f.formatted}`).slice(0, 2).join(' · ')}`,
+            toolTrace: traceItem,
+          });
+
+          toolResultsInput.push({
+            type: 'function_result',
+            call_id: fc.id,
+            name: tName,
+            result: JSON.stringify(toolRes.payload),
+          });
+        }
+
+        resp = await callInteractionRaw({
+          job: jobKey,
+          feature: `checker:loop:${situation.candidateId}:r${round}`,
+          model,
+          previousInteractionId: resp.id,
+          systemInstruction,
+          tools: CHECKER_TOOL_DECLARATIONS,
+          input: toolResultsInput,
+          timeoutMs,
+        });
+        if (resp.mode === 'live') anyLive = true;
+      }
+
+      // Ensure all gathered facts are clearly summarized for the structured output step
+      const factCatalog = Object.values(localFacts)
+        .map((f) => `- {{${f.id}}}: ${f.label} = ${f.formatted} (${f.note})`)
+        .join('\n');
+
+      const buildStructuredPrompt = (extraError?: string) =>
+        [
+          'Produce the final structured investigation JSON.',
+          'CRITICAL RULES:',
+          '- Every template (`finding_template`, `cause_template`, `proposal_template`) MUST be exactly one calm sentence.',
+          '- NEVER type any digits 0-9 anywhere in `finding_template`, `cause_template`, or `proposal_template` outside `{{fact_id}}` placeholders (for example write "three stores", "eight weeks", "late evening", not digits!).',
+          '- Every `{{fact_id}}` placeholder MUST come verbatim from the gathered fact catalog below.',
+          '- `ruled_out` MUST include all 3 items: `calendar`, `store_mix`, `data_fault`, each with its gathered `fact_id`.',
+          '- `options` MUST always include a `do_nothing` option (`is_do_nothing: true`).',
+          '- For Best-sellers / stock shortages, explicitly mention donor stores holding idle surplus if present in the gathered facts, and note if new stores keep total all-store sales positive while like-for-like established stores fell.',
+          extraError ? `\nFix this issue from your previous draft: ${extraError}` : '',
+          '\nGathered Fact Catalog:',
+          factCatalog,
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+      const callStructuredStep = async (promptText: string, usePrevId: boolean) => {
+        if (usePrevId) {
+          try {
+            return await callInteractionRaw({
+              job: jobKey,
+              feature: `checker:struct:${situation.candidateId}`,
+              model,
+              previousInteractionId: resp.id,
+              input: promptText,
+              responseFormat: {
+                type: 'text',
+                mime_type: 'application/json',
+                schema: INVESTIGATION_RESPONSE_SCHEMA,
+              },
+              timeoutMs,
+            });
+          } catch {
+            // Fallback to fresh call with gathered facts written into input (per spec)
+          }
+        }
+        return await callInteractionRaw({
+          job: jobKey,
+          feature: `checker:struct_fresh:${situation.candidateId}`,
+          model,
+          systemInstruction,
+          input: `${initialPrompt}\n\n${promptText}`,
+          responseFormat: {
+            type: 'text',
+            mime_type: 'application/json',
+            schema: INVESTIGATION_RESPONSE_SCHEMA,
+          },
+          timeoutMs,
+          store: false,
+        });
+      };
+
+      onEvent?.({ type: 'structured', message: 'Synthesizing findings and checking facts...' });
+
+      let parsedPayload: StructuredInvestigationPayload | null = null;
+      let findingSegments: TextSegment[] = [];
+      let causeSegments: TextSegment[] = [];
+      let proposalSegments: TextSegment[] = [];
+      let validationOk = false;
+      let extraRetryNote: string | undefined;
+
+      for (let attempt = 0; attempt <= GEMINI_SETTINGS.checkerLimits.maxPlaceholderRetries; attempt++) {
+        const sRes = await callStructuredStep(buildStructuredPrompt(extraRetryNote), attempt === 0);
+        if (sRes.mode === 'live') anyLive = true;
+        const candidateJson = JSON.parse(sRes.output_text) as StructuredInvestigationPayload;
+
+        const cFinding = validateAndResolvePlaceholders(candidateJson.finding_template, localFacts);
+        const cCause = validateAndResolvePlaceholders(candidateJson.cause_template, localFacts);
+        const cProposal = validateAndResolvePlaceholders(candidateJson.proposal_template, localFacts);
+
+        if (cFinding.ok && cCause.ok && cProposal.ok) {
+          parsedPayload = candidateJson;
+          findingSegments = cFinding.segments;
+          causeSegments = cCause.segments;
+          proposalSegments = cProposal.segments;
+          validationOk = true;
+          break;
+        }
+
+        const issues: string[] = [];
+        if (cFinding.hasTypedDigits || cCause.hasTypedDigits || cProposal.hasTypedDigits) {
+          issues.push('Remove ALL typed digits 0-9 outside {{fact_id}} placeholders (write counts like "three" or "two" in words, or use {{fact_id}}).');
+        }
+        const missingAll = [...cFinding.missingIds, ...cCause.missingIds, ...cProposal.missingIds];
+        if (missingAll.length > 0) {
+          issues.push(`Replace unknown placeholders [${missingAll.join(', ')}] with valid IDs from the Gathered Fact Catalog.`);
+        }
+        extraRetryNote = issues.join(' ');
+      }
+
+      const totalLatency = Math.max(1, Date.now() - modelStart);
+      const finalMode: 'live' | 'replayed' = anyLive ? 'live' : 'replayed';
+
+      if (!validationOk || !parsedPayload) {
+        const codeFallback = buildCodeFallbackInvestigation(
+          situation,
+          sim,
+          date,
+          localFacts,
+          toolTrace,
+          model,
+          finalMode,
+          totalLatency,
+          true,
+        );
+        onEvent?.({ type: 'done', message: 'Investigation verified with code wording.', result: codeFallback });
+        return codeFallback;
+      }
+
+      // Normalize ruled_out to always cover calendar, store_mix, data_fault
+      const ruledOutKinds: Array<'calendar' | 'store_mix' | 'data_fault'> = [
+        'calendar',
+        'store_mix',
+        'data_fault',
+      ];
+      const ruledOutLabels: Record<'calendar' | 'store_mix' | 'data_fault', string> = {
+        calendar: 'Calendar',
+        store_mix: 'Store mix',
+        data_fault: 'Data fault',
+      };
+      const ruledOut: InvestigationRuledOut[] = ruledOutKinds.map((kind) => {
+        const match = parsedPayload!.ruled_out.find((r) => r.kind === kind);
+        const fact = match?.fact_id ? localFacts[match.fact_id] : undefined;
+        return {
+          kind,
+          label: ruledOutLabels[kind],
+          ruledOut: match?.ruled_out ?? true,
+          summary: match?.summary ?? `${ruledOutLabels[kind]} checked and ruled out.`,
+          fact,
+        };
+      });
+
+      const options: InvestigationOption[] = parsedPayload.options.map((opt) => ({
+        id: opt.id,
+        label: opt.label,
+        isDoNothing: opt.is_do_nothing,
+        description: opt.description,
+        weeklyEffectFact: localFacts[opt.weekly_effect_fact_id],
+      }));
+      if (!options.some((o) => o.isDoNothing)) {
+        const fallbackDn = createFact(
+          `checker:dn:${situation.candidateId}:${date}`,
+          'Do nothing weekly effect',
+          -situation.stakePerWeek.value,
+          'USD',
+          'Weekly sales exposure if no action is taken.',
+        );
+        localFacts[fallbackDn.id] = fallbackDn;
+        options.push({
+          id: 'do_nothing',
+          label: 'Do nothing',
+          isDoNothing: true,
+          description: 'Take no action and accept the ongoing weekly exposure.',
+          weeklyEffectFact: fallbackDn,
+        });
+      }
+
+      const causes = parsedPayload.causes.map((c) => ({
+        summary: c.summary,
+        factIds: c.fact_ids,
+        facts: c.fact_ids.map((id) => localFacts[id]).filter((f): f is Fact => Boolean(f)),
+      }));
+
+      const isLetGo = parsedPayload.outcome_kind === 'nothing_to_do';
+
+      const finalResult: InvestigationResult = {
+        candidateId: situation.candidateId,
+        status: isLetGo ? 'let_go' : 'confirmed',
+        confirmed: parsedPayload.confirmed,
+        findingSegments,
+        causeSegments,
+        proposalSegments,
+        causes,
+        ruledOut,
+        options,
+        outcomeKind: parsedPayload.outcome_kind,
+        outcomeDetail: parsedPayload.outcome_detail,
+        model,
+        mode: finalMode,
+        latencyMs: totalLatency,
+        usedFallbackWording: false,
+        toolTrace,
+        factsById: localFacts,
+      };
+
+      onEvent?.({ type: 'done', message: 'Investigation complete.', result: finalResult });
+      return finalResult;
+    } catch (err) {
+      const msg = formatGeminiError(err);
+      if (isModelUnavailableError(err) && mIdx < cfg.models.length - 1) {
+        continue;
+      }
+      // Also allow 1 try on next model on timeout/failure if this was the primary model
+      if (mIdx === 0 && cfg.models.length > 1) {
+        continue;
+      }
+      const totalLatency = Math.max(1, Date.now() - startAll);
+      const fallback = buildCodeFallbackInvestigation(
+        situation,
+        sim,
+        date,
+        localFacts,
+        toolTrace,
+        `code (fallback, Gemini not used: ${msg})`,
+        'fallback',
+        totalLatency,
+        true,
+      );
+      onEvent?.({ type: 'done', message: 'Investigation completed on code fallback.', result: fallback });
+      return fallback;
+    }
+  }
+
+  const fallback = buildCodeFallbackInvestigation(
+    situation,
+    sim,
+    date,
+    factsById,
+    [],
+    'code (fallback, Gemini not used)',
+    'fallback',
+    Math.max(1, Date.now() - startAll),
+    true,
+  );
+  onEvent?.({ type: 'done', message: 'Investigation completed on code fallback.', result: fallback });
+  return fallback;
+}

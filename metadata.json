@@ -1,0 +1,8 @@
+{
+  "name": "OpsCien Instinct",
+  "description": "Autonomous retail operations prototype for Linden & Rye: notices anomalies, checks silence rules, and tracks operational facts on a deterministic clock.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
