@@ -3,7 +3,9 @@ export type GeminiJobKey =
   | 'investigate_large'
   | 'investigate_routine'
   | 'day_one_description'
-  | 'code_execution';
+  | 'code_execution'
+  | 'builder_requirement'
+  | 'builder_tool';
 
 export type ThinkingLevelSetting = 'low' | 'medium' | 'high';
 
@@ -43,8 +45,8 @@ export const GEMINI_SETTINGS = {
       api: 'interactions',
       models: ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-hydrogen'],
       thinkingLevel: 'low',
-      firstTimeoutMs: 45000,
-      fallbackTimeoutMs: 25000,
+      firstTimeoutMs: 90000,
+      fallbackTimeoutMs: 45000,
       capBucket: 'other',
     },
     investigate_routine: {
@@ -53,8 +55,8 @@ export const GEMINI_SETTINGS = {
       api: 'interactions',
       models: ['gemini-4-hydrogen', 'gemini-3.8-flash'],
       thinkingLevel: 'low',
-      firstTimeoutMs: 45000,
-      fallbackTimeoutMs: 25000,
+      firstTimeoutMs: 90000,
+      fallbackTimeoutMs: 45000,
       capBucket: 'other',
     },
     day_one_description: {
@@ -73,8 +75,28 @@ export const GEMINI_SETTINGS = {
       api: 'interactions',
       models: ['gemini-4-hydrogen', 'gemini-3.8-flash'],
       thinkingLevel: 'low',
-      firstTimeoutMs: 35000,
-      fallbackTimeoutMs: 25000,
+      firstTimeoutMs: 60000,
+      fallbackTimeoutMs: 45000,
+      capBucket: 'other',
+    },
+    builder_requirement: {
+      key: 'builder_requirement',
+      label: 'Writing tool requirement',
+      api: 'interactions',
+      models: ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-hydrogen'],
+      thinkingLevel: 'low',
+      firstTimeoutMs: 45000,
+      fallbackTimeoutMs: 30000,
+      capBucket: 'other',
+    },
+    builder_tool: {
+      key: 'builder_tool',
+      label: 'Building single-file tool',
+      api: 'interactions',
+      models: ['gemini-4-carbon', 'gemini-4-argon', 'gemini-4-hydrogen'],
+      thinkingLevel: 'medium',
+      firstTimeoutMs: 120000,
+      fallbackTimeoutMs: 120000,
       capBucket: 'other',
     },
   } satisfies Record<GeminiJobKey, GeminiJobConfig>,

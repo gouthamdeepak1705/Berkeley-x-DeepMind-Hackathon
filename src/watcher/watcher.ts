@@ -15,6 +15,7 @@ import {
 } from '../gemini/client';
 import { GEMINI_SETTINGS } from '../gemini/settings';
 import {
+  BuiltToolRecord,
   Candidate,
   RaisedItem,
   StoreId,
@@ -294,8 +295,20 @@ export async function evaluateWatcherBatch(params: {
   letGoSummaries: string[];
   decisions: Parameters<typeof buildWatcherBriefing>[0]['decisions'];
   controlStores: Set<string>;
+  builtTools?: BuiltToolRecord[];
+  reviewedRefundIds?: string[];
 }): Promise<WatcherBatchResult> {
-  const { sim, date, subjects, openSituations, letGoSummaries, decisions, controlStores } = params;
+  const {
+    sim,
+    date,
+    subjects,
+    openSituations,
+    letGoSummaries,
+    decisions,
+    controlStores,
+    builtTools,
+    reviewedRefundIds,
+  } = params;
   const briefing = buildWatcherBriefing({
     sim,
     date,
@@ -304,6 +317,8 @@ export async function evaluateWatcherBatch(params: {
     letGoSummaries,
     decisions,
     controlStores,
+    builtTools,
+    reviewedRefundIds,
   });
 
   if (subjects.length === 0) {

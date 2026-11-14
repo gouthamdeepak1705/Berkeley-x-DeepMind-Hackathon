@@ -8,6 +8,7 @@ interface ClockHeaderProps {
   dayIndex: number;
   totalDays: number;
   isPlaying: boolean;
+  isBusy?: boolean;
   speed: PlaybackSpeed;
   hasNextEvent: boolean;
   onTogglePlay: () => void;
@@ -21,6 +22,7 @@ export function ClockHeader({
   dayIndex,
   totalDays,
   isPlaying,
+  isBusy = false,
   speed,
   hasNextEvent,
   onTogglePlay,
@@ -59,7 +61,7 @@ export function ClockHeader({
         <button
           type="button"
           onClick={onTogglePlay}
-          disabled={isAtEnd && !isPlaying}
+          disabled={!isPlaying && (isAtEnd || isBusy)}
           aria-label={isPlaying ? 'Pause simulation clock' : 'Play simulation clock'}
           className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-[#312E81] text-white hover:bg-[#26236B] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
@@ -92,7 +94,7 @@ export function ClockHeader({
         <button
           type="button"
           onClick={onSkipToNextEvent}
-          disabled={!hasNextEvent || isAtEnd}
+          disabled={!hasNextEvent || isAtEnd || isBusy}
           className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-[#E6E1D8] bg-white text-[#171717] hover:bg-[#F3F0EA] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <FastForward className="w-3.5 h-3.5 text-[#312E81]" />

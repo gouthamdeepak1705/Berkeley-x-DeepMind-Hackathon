@@ -1,7 +1,15 @@
+import { computeExpectedFlaggedStats } from '../builder/builder';
 import { addDays, formatShortDate, getCalendarSpansOverlappingRange } from '../engine/calendar';
 import { SimulationRun } from '../engine/simulation';
 import { ESTABLISHED_STORES, STORE_MAP } from '../engine/stores';
-import { ActionDecision, Candidate, ProductGroupId, RaisedItem, StoreId } from '../types/domain';
+import {
+  ActionDecision,
+  BuiltToolRecord,
+  Candidate,
+  ProductGroupId,
+  RaisedItem,
+  StoreId,
+} from '../types/domain';
 
 export interface WatcherSubject {
   key: string; // situationId or candidateId
@@ -90,8 +98,20 @@ export function buildWatcherBriefing(params: {
   letGoSummaries: string[];
   decisions: ActionDecision[];
   controlStores: Set<string>;
+  builtTools?: BuiltToolRecord[];
+  reviewedRefundIds?: string[];
 }): string {
-  const { sim, date, subjects, openSituations, letGoSummaries, decisions, controlStores } = params;
+  const {
+    sim,
+    date,
+    subjects,
+    openSituations,
+    letGoSummaries,
+    decisions,
+    controlStores,
+    builtTools = [],
+    reviewedRefundIds = [],
+  } = params;
 
   const weekStart = addDays(date, -6);
   const overlappingSpans = getCalendarSpansOverlappingRange(weekStart, date);
@@ -129,9 +149,14 @@ export function buildWatcherBriefing(params: {
           .map((s) => `${s.title} (open since ${formatShortDate(s.firstDetectedOn)}, stake ${s.stakePerWeek.formatted}/wk)`)
           .join('; ')
       : 'none';
+  const activeDecisionsAsOfDate = decisions.filter(
+    (d) => d.date <= date && d.kind !== 'store_manager_task',
+  );
   const decisionText =
-    decisions.length > 0
-      ? decisions.map((d) => `${d.kind} for ${d.candidateId} on ${d.date}`).join('; ')
+    activeDecisionsAsOfDate.length > 0
+      ? activeDecisionsAsOfDate
+          .map((d) => `${d.kind} (${d.title ?? d.candidateId}) on ${d.date}`)
+          .join('; ')
       : 'none';
   const controlText = controlStores.size > 0 ? Array.from(controlStores).join(', ') : 'none';
   const recentLetGoText = letGoSummaries.length > 0 ? letGoSummaries.slice(-4).join('; ') : 'none';
@@ -139,6 +164,21 @@ export function buildWatcherBriefing(params: {
   lines.push(
     `Current state: Open situations = ${openText}. Actions already under way = ${decisionText}. Control holdout stores = ${controlText}. Recently let go = ${recentLetGoText}.`,
   );
+
+  const refundDesk = builtTools.find(
+    (t) => t.situationId.includes('refunds_out_of_line') && t.installedOn <= date,
+  );
+  if (refundDesk) {
+    const windowStart = addDays(date, -34);
+    const rowsAsOfDate = sim.walnutCreekRefunds.filter(
+      (r) => r.date >= windowStart && r.date <= date,
+    );
+    const stats = computeExpectedFlaggedStats(rowsAsOfDate, new Set(reviewedRefundIds));
+    lines.push(
+      `Installed Refund exceptions desk (Walnut Creek, last 35 days): ${stats.unreviewedFlaggedCount} unreviewed flagged late-evening unlinked cash refunds remaining out of ${stats.count} flagged ($${stats.total.toFixed(2)}).`,
+    );
+  }
+
   lines.push('');
   lines.push('Situations to evaluate today:');
 

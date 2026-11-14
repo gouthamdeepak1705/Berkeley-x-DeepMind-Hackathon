@@ -610,12 +610,27 @@ export async function callInteractionRaw(params: {
     const inputTokens = resp.usage?.total_input_tokens ?? 0;
     const outputTokens = resp.usage?.total_output_tokens ?? 0;
     const steps: InteractionStep[] = Array.isArray(resp.steps) ? resp.steps : [];
+    const extractedStepText = steps
+      .map((s) => {
+        if (s.type === 'text' && typeof s.text === 'string') return s.text;
+        const anyStep = s as unknown as {
+          type?: string;
+          content?: Array<{ type?: string; text?: string }>;
+        };
+        if (anyStep.type === 'model_output' && Array.isArray(anyStep.content)) {
+          return anyStep.content
+            .filter((p) => p.type === 'text' && typeof p.text === 'string')
+            .map((p) => p.text!)
+            .join('');
+        }
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
     const outputText =
-      resp.output_text ??
-      steps
-        .filter((s) => s.type === 'text' && typeof s.text === 'string')
-        .map((s) => s.text)
-        .join('\n');
+      typeof resp.output_text === 'string' && resp.output_text.length > 0
+        ? resp.output_text
+        : extractedStepText;
 
     const result: InteractionCallResult = {
       id: resp.id,

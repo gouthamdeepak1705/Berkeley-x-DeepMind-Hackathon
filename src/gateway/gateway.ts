@@ -14,8 +14,17 @@ import {
 export interface GatewayActionRequest {
   candidateId: string;
   date: string;
-  kind: 'transfer' | 'control_holdout' | 'refund_audit' | 'other';
+  kind:
+    | 'transfer'
+    | 'control_holdout'
+    | 'refund_audit'
+    | 'refund_switch'
+    | 'store_manager_task'
+    | 'other';
+  storeId?: StoreId;
   groupId?: 'best_sellers' | 'knitwear';
+  dueDate?: string;
+  toolId?: string;
   transferLines?: TransferLine[];
   holdoutStoreId?: StoreId;
   holdoutStoreName?: string;
@@ -321,7 +330,7 @@ export function executeActionThroughGateway(
     };
   }
 
-  // Non-transfer decision (e.g. refund_audit)
+  // Non-transfer decision (e.g. refund_switch, store_manager_task, refund_audit)
   if (!request.ownerApproved) {
     const reason = 'Refused: action requires owner approval.';
     const traceEntry: TraceEntry = {
@@ -337,17 +346,35 @@ export function executeActionThroughGateway(
     return { ok: false, refusalReason: reason, traceEntry };
   }
 
-  const decisionId = `act:${request.candidateId}:${date}`;
+  const decisionId = `act:${request.candidateId}:${request.kind}:${date}`;
+  const defaultProofDays =
+    request.kind === 'refund_switch' ? 21 : request.kind === 'store_manager_task' ? 3 : 28;
+  const proofEndDate = request.dueDate ?? addDays(date, defaultProofDays);
   const decision: ActionDecision = {
     id: decisionId,
     date,
     candidateId: request.candidateId,
     kind: request.kind,
+    storeId: request.storeId ?? (request.kind === 'refund_switch' || request.kind === 'store_manager_task' ? 'walnut_creek' : undefined),
+    dueDate: request.kind === 'store_manager_task' ? proofEndDate : request.dueDate,
+    toolId: request.toolId,
     approvedBy: request.approvedBy ?? 'Owner',
     approvedAtDate: date,
-    measure: request.measure ?? `Store refund rate vs median (28 days)`,
-    proofEndDate: addDays(date, 28),
-    title: request.title ?? 'Approved owner action',
+    measure:
+      request.measure ??
+      (request.kind === 'refund_switch'
+        ? 'Walnut Creek 21-day cash refund rate before vs after switch'
+        : request.kind === 'store_manager_task'
+          ? 'Store manager explanation for Till 2 cash refunds after 8 pm'
+          : 'Store refund rate vs median (28 days)'),
+    proofEndDate,
+    title:
+      request.title ??
+      (request.kind === 'refund_switch'
+        ? 'Require manager approval for cash refunds over $50 at Walnut Creek'
+        : request.kind === 'store_manager_task'
+          ? 'Ask Walnut Creek store manager about Till 2 cash refunds'
+          : 'Approved owner action'),
   };
 
   const traceEntry: TraceEntry = {
@@ -356,7 +383,12 @@ export function executeActionThroughGateway(
     lane: 'manager',
     kind: 'gateway',
     headline: `Gateway approved: ${decision.title}`,
-    detail: `Approved by ${decision.approvedBy} on ${formatShortDate(date)}.`,
+    detail:
+      request.kind === 'refund_switch'
+        ? `Approved by ${decision.approvedBy} on ${formatShortDate(date)} · applies from ${formatShortDate(addDays(date, 1))} · 21-day before/after check ends ${formatShortDate(proofEndDate)}.`
+        : request.kind === 'store_manager_task'
+          ? `Simulated manager question logged on ${formatShortDate(date)} · due ${formatShortDate(proofEndDate)} (no external message sent).`
+          : `Approved by ${decision.approvedBy} on ${formatShortDate(date)}.`,
     outcome: 'raised',
   };
   gatewayAttemptLog.push(traceEntry);

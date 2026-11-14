@@ -139,6 +139,7 @@ export function evaluateSilenceChecks(
     } else {
       const matchingDecision = decisions.find((d) => {
         if (d.date > date || d.undoneOnDate) return false;
+        if (d.kind === 'store_manager_task') return false;
         if (d.candidateId === candidate.id) return true;
         if (candidate.groupId && d.candidateId === `situation:stock_running_out:${candidate.groupId}`) {
           if (
@@ -167,7 +168,17 @@ export function evaluateSilenceChecks(
       });
       if (matchingDecision) {
         triggered = true;
-        reason = `Already handled by action ${matchingDecision.id} on ${matchingDecision.date}.`;
+        const actionLabel = matchingDecision.title
+          ? matchingDecision.title
+          : matchingDecision.groupId === 'best_sellers'
+            ? 'Best-sellers transfer'
+            : matchingDecision.groupId === 'knitwear'
+              ? 'Knitwear transfer'
+              : matchingDecision.kind === 'refund_switch'
+                ? 'Walnut Creek cash refund approval switch'
+                : 'approved action';
+        const prefix = actionLabel.toLowerCase().startsWith('the ') ? '' : 'the ';
+        reason = `Already handled: ${prefix}${actionLabel} you approved on ${formatShortDate(matchingDecision.date)}.`;
       }
     }
 

@@ -231,9 +231,9 @@ export function TracePanel({ trace, telemetry, onInspectFact, onOpenDevPage }: T
 
         {/* Lane 3: Developer */}
         <div className="bg-white border border-[#E6E1D8] rounded-xl p-4">
-          <div className="flex items-baseline justify-between pb-3 border-b border-[#E6E1D8]">
-            <h3 className="text-xs font-semibold text-[#171717]">Developer</h3>
-            <span className="text-[11px] font-mono tabular-nums text-[#78716C]">
+          <div className="flex items-baseline justify-between gap-2 pb-3 border-b border-[#E6E1D8]">
+            <h3 className="text-xs font-semibold text-[#171717] shrink-0">Developer</h3>
+            <span className="text-[11px] font-mono tabular-nums text-[#78716C] text-right">
               {telemetry
                 ? `${telemetry.liveCalls} live · ${telemetry.replayedCalls} replayed`
                 : `${devEntries.length} events`}
@@ -267,6 +267,39 @@ export function TracePanel({ trace, telemetry, onInspectFact, onOpenDevPage }: T
             <p className="mt-3 text-xs text-[#78716C]">Nothing yet.</p>
           ) : (
             <ul className="mt-3 space-y-2.5 max-h-[520px] overflow-y-auto pr-1">
+              {devEntries.map((entry) => (
+                <li
+                  key={entry.id}
+                  className="pb-2.5 border-b border-[#F3F0EA] last:border-b-0 last:pb-0 text-xs"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-semibold text-[#171717]">
+                      {entry.kind === 'builder' && (
+                        <span className="inline-block mr-1.5 px-1.5 py-0.5 text-[10px] font-mono rounded border bg-[#EEF2FF] text-[#312E81] border-[#C7D2FE]">
+                          Builder
+                        </span>
+                      )}
+                      {entry.headline}
+                    </span>
+                    <span className="font-mono text-[11px] text-[#78716C] shrink-0">
+                      {formatShortDate(entry.date)}
+                    </span>
+                  </div>
+                  {entry.meta && (entry.meta.model || entry.meta.mode) && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] font-mono text-[#78716C]">
+                      {entry.meta.model && <span>{entry.meta.model}</span>}
+                      <ModeTag mode={entry.meta.mode} />
+                      {typeof entry.meta.latencyMs === 'number' && (
+                        <span>
+                          {entry.meta.latencyMs} ms
+                          {entry.meta.mode === 'replayed' ? ' (replayed)' : ''}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  <p className="mt-1 text-[#57534E] leading-relaxed">{entry.detail}</p>
+                </li>
+              ))}
               {(telemetry?.recentCalls ?? []).map((call) => (
                 <li
                   key={call.id}
@@ -278,26 +311,13 @@ export function TracePanel({ trace, telemetry, onInspectFact, onOpenDevPage }: T
                   </div>
                   <p className="mt-0.5 text-[#57534E] font-mono truncate">{call.feature}</p>
                   <p className="mt-0.5 text-[#78716C] font-mono tabular-nums">
-                    {call.latencyMs} ms · in {call.inputTokens} / out {call.outputTokens} · $
+                    {call.latencyMs} ms{call.mode === 'replayed' ? ' (replayed)' : ''} · in{' '}
+                    {call.inputTokens} / out {call.outputTokens} · $
                     {call.estimatedCostUsd.toFixed(5)}
                   </p>
                   {call.error && (
                     <p className="mt-0.5 text-[#B45309] break-words">{call.error}</p>
                   )}
-                </li>
-              ))}
-              {devEntries.map((entry) => (
-                <li
-                  key={entry.id}
-                  className="pb-2.5 border-b border-[#F3F0EA] last:border-b-0 last:pb-0 text-xs"
-                >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="font-semibold text-[#171717]">{entry.headline}</span>
-                    <span className="font-mono text-[11px] text-[#78716C] shrink-0">
-                      {formatShortDate(entry.date)}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[#57534E] leading-relaxed">{entry.detail}</p>
                 </li>
               ))}
             </ul>

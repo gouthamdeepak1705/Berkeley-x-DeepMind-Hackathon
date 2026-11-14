@@ -379,7 +379,8 @@ export interface TraceEntry {
     | 'tool_call'
     | 'investigation'
     | 'gateway'
-    | 'followup';
+    | 'followup'
+    | 'builder';
   headline: string;
   detail: string;
   outcome: 'let_go' | 'raised' | 'info';
@@ -411,10 +412,18 @@ export interface ActionDecision {
   id: string;
   date: string;
   candidateId: string;
-  kind: 'transfer' | 'control_holdout' | 'refund_audit' | 'other';
+  kind:
+    | 'transfer'
+    | 'control_holdout'
+    | 'refund_audit'
+    | 'refund_switch'
+    | 'store_manager_task'
+    | 'other';
   storeId?: StoreId;
   groupId?: ProductGroupId;
   arrivalDate?: string;
+  dueDate?: string;
+  toolId?: string;
   transferLines?: TransferLine[];
   holdoutStoreId?: StoreId;
   holdoutStoreName?: string;
@@ -439,19 +448,78 @@ export interface InProgressAction {
   arrivalDate: string;
   holdoutStoreName?: string;
   latestGapPtsFact?: Fact;
+  beforeRefundRateFact?: Fact;
+  afterRefundRateFact?: Fact;
+  isSimulatedTask?: boolean;
 }
 
 export interface DoneForYouItem {
   decisionId: string;
   candidateId: string;
   title: string;
-  verdict: 'worked_proven' | 'unclear' | 'did_not_work';
+  verdict: 'worked_proven' | 'worked_before_after' | 'unclear' | 'did_not_work';
   verdictSentence: string;
+  detailSentence?: string;
   approvedOn: string;
   closedOn: string;
   provenMoneyFact?: Fact;
+  beforeRefundRateFact?: Fact;
+  afterRefundRateFact?: Fact;
   undone?: boolean;
   holdoutStoreName?: string;
+}
+
+export interface BuilderRequirement {
+  situationId: string;
+  title: string;
+  generatedOn: string;
+  purpose: TextSegment[];
+  users: TextSegment[];
+  shows: TextSegment[];
+  actions: TextSegment[];
+  verification: TextSegment[];
+  plainSummary: {
+    purpose: string;
+    users: string;
+    shows: string;
+    actions: string;
+    verification: string;
+  };
+  factsById: Record<string, Fact>;
+  model: string;
+  mode: 'live' | 'replayed' | 'fallback';
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  usedFallbackWording: boolean;
+}
+
+export interface ToolTestCaseResult {
+  id: 'loads_cleanly' | 'flagged_math_matches' | 'mark_reviewed_responds';
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface BuiltToolRecord {
+  id: string;
+  situationId: string;
+  title: string;
+  storeId: StoreId;
+  storeName: string;
+  installedOn: string;
+  html: string;
+  model: string;
+  mode: 'live' | 'replayed' | 'fallback';
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  byteSize: number;
+  usedFallbackCopy: boolean;
+  repairedOnce: boolean;
+  repairReason?: string;
+  requirement: BuilderRequirement;
+  testResults: ToolTestCaseResult[];
 }
 
 export interface DayOneBrief {
@@ -523,6 +591,11 @@ export interface DayState {
   watcherEvalLog?: WatcherEvalRecord[];
   pendingInvestigationId?: string;
   reactions?: CardReaction[];
+  builtTools?: BuiltToolRecord[];
+  refundSwitchEnabled?: boolean;
+  reviewedRefundIds?: string[];
+  refundRows?: RefundRecord[];
+  toolUnreviewedFact?: Fact;
 }
 
 export interface DiagnosticTargetResult {

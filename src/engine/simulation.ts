@@ -105,6 +105,11 @@ export function runSimulation(
   const dates = enumerateDates(HISTORY_START_DATE, effectiveEnd);
   const liveDates = dates.filter((d) => d >= LIVE_START_DATE);
 
+  const activeRefundSwitchDate = decisions
+    .filter((d) => d.kind === 'refund_switch' && !d.undoneOnDate)
+    .map((d) => d.date)
+    .sort()[0];
+
   const storeRecordsByDate: Record<string, Record<StoreId, DailyStoreRecord>> = {};
   const chainRecordsByDate: Record<string, DailyChainRecord> = {};
   const median26WeekGrowthByDate: Record<string, number> = {};
@@ -480,7 +485,9 @@ export function runSimulation(
       const baseCashRefund = baseRefund * baseCashShare;
 
       let extraCashRefund = 0;
-      if (store.id === 'walnut_creek' && date >= '2026-09-15') {
+      const refundSwitchActiveToday =
+        activeRefundSwitchDate !== undefined && date > activeRefundSwitchDate;
+      if (store.id === 'walnut_creek' && date >= '2026-09-15' && !refundSwitchActiveToday) {
         const extraRate = seededRange(seed, `wc_extra_ref:${date}`, 0.095, 0.108);
         extraCashRefund = actualStoreSales * extraRate;
       }
@@ -604,9 +611,8 @@ export function runSimulation(
     };
   }
 
-  // Keep only latest 35 days of Walnut Creek refund records relative to effectiveEnd
-  const cutoffDate = addDays(effectiveEnd, -34);
-  const walnutCreekRefunds = allWalnutCreekRefunds.filter((r) => r.date >= cutoffDate);
+  // Keep live-window Walnut Creek refund records so any live day D can query its trailing 35 days <= D
+  const walnutCreekRefunds = allWalnutCreekRefunds;
 
   // Build Day One brief from computed history facts (up to 2026-07-31)
   const dayOneBrief = buildDayOneBrief(storeRecordsByDate);

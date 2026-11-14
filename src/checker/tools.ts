@@ -230,6 +230,26 @@ export const CHECKER_TOOL_DECLARATIONS: InteractionToolDecl[] = [
       required: ['group_id'],
     },
   },
+  {
+    type: 'function',
+    name: 'get_refund_breakdown',
+    description:
+      'Inspect a store’s last 35 days of refund records up to today, breaking down refunds by payment method (cash vs card), till number, operator number, hour of day (after 8 pm vs earlier), and whether an order is linked, compared against the other established stores.',
+    parameters: {
+      type: 'object',
+      properties: {
+        store_id: {
+          type: 'string',
+          description: 'Store id to inspect (e.g. walnut_creek).',
+        },
+        window_days: {
+          type: 'integer',
+          description: 'Trailing window in days for rate comparison (default 28, logs up to 35).',
+        },
+      },
+      required: ['store_id'],
+    },
+  },
 ];
 
 function isValidStoreId(id: unknown): id is StoreId {
@@ -880,6 +900,151 @@ export function executeCheckerTool(
         arrival_date: plan.arrivalDate,
         shortfall_units: plan.shortfallUnitsFact?.value ?? 0,
         transfer_lines: plan.transferLines,
+      },
+    };
+  }
+
+  if (toolName === 'get_refund_breakdown') {
+    const storeId: StoreId = isValidStoreId(args.store_id)
+      ? args.store_id
+      : situation?.stores?.[0]?.storeId ?? 'walnut_creek';
+    const windowDays = Math.max(7, Math.min(35, Number(args.window_days ?? 28) || 28));
+    const startIdx = Math.max(0, safeDateIdx - windowDays + 1);
+
+    let storeSales = 0;
+    let storeRefunds = 0;
+    const otherRates: number[] = [];
+
+    for (const est of ESTABLISHED_STORES) {
+      let s = 0;
+      let r = 0;
+      for (let k = startIdx; k <= safeDateIdx; k++) {
+        const rec = sim.storeRecordsByDate[sim.dates[k]][est.id];
+        if (!rec.isOpen) continue;
+        s += rec.actualSales;
+        r += rec.refundAmount;
+      }
+      if (est.id === storeId) {
+        storeSales = s;
+        storeRefunds = r;
+      } else if (s > 0) {
+        otherRates.push((r / s) * 100);
+      }
+    }
+
+    const storeRatePct = storeSales > 0 ? (storeRefunds / storeSales) * 100 : 0;
+    const otherMedianPct = median(otherRates);
+    const excessRefundUsd = Math.max(0, storeRefunds - storeSales * (otherMedianPct / 100));
+    const weeklyExcessUsd = excessRefundUsd / (windowDays / 7);
+
+    const logStart = addDays(safeDate, -34);
+    const recentLogs =
+      storeId === 'walnut_creek'
+        ? getRefundsUpToDate(sim, safeDate).filter((r) => r.date >= logStart && r.date <= safeDate)
+        : [];
+
+    const cashLogs = recentLogs.filter((r) => r.method === 'cash');
+    const cashUsd = cashLogs.reduce((s, r) => s + r.amount, 0);
+    const totalLogUsd = recentLogs.reduce((s, r) => s + r.amount, 0);
+    const cashSharePct = totalLogUsd > 0 ? (cashUsd / totalLogUsd) * 100 : 0;
+
+    const after8UnlinkedCash = cashLogs.filter((r) => r.time >= '20:00' && !r.linkedOrder);
+    const after8Op14Till2 = after8UnlinkedCash.filter((r) => r.till === 2 && r.operatorNumber === 14);
+    const after8Op14Usd = after8Op14Till2.reduce((s, r) => s + r.amount, 0);
+    const after8UnlinkedPct = totalLogUsd > 0 ? (after8UnlinkedCash.reduce((s, r) => s + r.amount, 0) / totalLogUsd) * 100 : 0;
+
+    const byTill: Record<string, { count: number; usd: number }> = {};
+    const byOperator: Record<string, { count: number; usd: number }> = {};
+    const byHourBand = { before_20_00: { count: 0, usd: 0 }, at_or_after_20_00: { count: 0, usd: 0 } };
+    for (const r of recentLogs) {
+      const tillKey = `Till ${r.till}`;
+      byTill[tillKey] = byTill[tillKey] ?? { count: 0, usd: 0 };
+      byTill[tillKey].count += 1;
+      byTill[tillKey].usd = Math.round((byTill[tillKey].usd + r.amount) * 100) / 100;
+
+      const opKey = `Operator ${r.operatorNumber}`;
+      byOperator[opKey] = byOperator[opKey] ?? { count: 0, usd: 0 };
+      byOperator[opKey].count += 1;
+      byOperator[opKey].usd = Math.round((byOperator[opKey].usd + r.amount) * 100) / 100;
+
+      const band = r.time >= '20:00' ? byHourBand.at_or_after_20_00 : byHourBand.before_20_00;
+      band.count += 1;
+      band.usd = Math.round((band.usd + r.amount) * 100) / 100;
+    }
+
+    const fStoreRate = createFact(
+      `tool:refund_bd:store_rate:${storeId}:${safeDate}`,
+      `${STORE_MAP[storeId].name} refund rate (${windowDays}d)`,
+      storeRatePct,
+      'percent',
+      `${STORE_MAP[storeId].name} total refunds ($${Math.round(storeRefunds).toLocaleString('en-US')}) divided by sales ($${Math.round(storeSales).toLocaleString('en-US')}) over ${windowDays} days through ${safeDate}.`,
+    );
+    const fOtherRate = createFact(
+      `tool:refund_bd:other_rate:${storeId}:${safeDate}`,
+      'Other established stores median refund rate',
+      otherMedianPct,
+      'percent',
+      `Median ${windowDays}-day refund rate across the other 7 established stores ending ${safeDate}.`,
+    );
+    const fCashShare = createFact(
+      `tool:refund_bd:cash_share:${storeId}:${safeDate}`,
+      'Cash share of store refunds (35d)',
+      cashSharePct,
+      'percent',
+      `Cash refunds ($${Math.round(cashUsd).toLocaleString('en-US')}) divided by total logged 35-day refunds ($${Math.round(totalLogUsd).toLocaleString('en-US')}).`,
+    );
+    const fAfter8Share = createFact(
+      `tool:refund_bd:after8_share:${storeId}:${safeDate}`,
+      'Unlinked cash refunds after 8 pm share',
+      after8UnlinkedPct,
+      'percent',
+      `${after8UnlinkedCash.length} cash refunds recorded at or after 20:00 with no linked order out of ${recentLogs.length} 35-day refund records.`,
+    );
+    const fOp14Count = createFact(
+      `tool:refund_bd:op14_count:${storeId}:${safeDate}`,
+      'Flagged Till 2 operator 14 cash refunds after 8 pm',
+      after8Op14Till2.length,
+      'count',
+      `Cash refunds at ${STORE_MAP[storeId].name} on Till 2, operator 14, at or after 20:00 with no linked order over the last 35 days through ${safeDate}.`,
+    );
+    const fOp14Usd = createFact(
+      `tool:refund_bd:op14_usd:${storeId}:${safeDate}`,
+      'Flagged Till 2 operator 14 cash refunds total',
+      after8Op14Usd,
+      'USD',
+      `Total dollar value of ${after8Op14Till2.length} unlinked cash refunds after 20:00 on Till 2, operator 14, through ${safeDate}.`,
+    );
+    const fWeeklyExcess = createFact(
+      `tool:refund_bd:weekly_excess:${storeId}:${safeDate}`,
+      'Weekly excess cash refund exposure',
+      weeklyExcessUsd,
+      'USD',
+      `Excess refunds above the ${otherMedianPct.toFixed(1)}% other-store benchmark per week.`,
+    );
+
+    const facts = [
+      fStoreRate,
+      fOtherRate,
+      fCashShare,
+      fAfter8Share,
+      fOp14Count,
+      fOp14Usd,
+      fWeeklyExcess,
+    ];
+
+    return {
+      toolName,
+      argsSummary: `store_id=${storeId}, window_days=${windowDays}`,
+      facts,
+      payload: {
+        facts,
+        record_count_35d: recentLogs.length,
+        by_till: byTill,
+        by_operator: byOperator,
+        by_hour_band: byHourBand,
+        flagged_pattern: 'cash, at or after 20:00, no linked order, Till 2, operator 14',
+        flagged_count: after8Op14Till2.length,
+        flagged_usd: Math.round(after8Op14Usd * 100) / 100,
       },
     };
   }

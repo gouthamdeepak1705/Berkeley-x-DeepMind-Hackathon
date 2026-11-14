@@ -130,6 +130,19 @@ function buildLetGoMetadata(
     };
   }
 
+  if (check === 'already_handled') {
+    const reason = cand.explainedBy!.reason;
+    const isControl = reason.toLowerCase().includes('control store');
+    return {
+      weekKey,
+      groupSummaryKey: isControl
+        ? `already_handled:control:${cand.storeId ?? 'store'}:${weekKey}`
+        : `already_handled:decision:${weekKey}:${reason}`,
+      groupHeadline: reason,
+      storeName,
+    };
+  }
+
   return {
     weekKey,
     groupSummaryKey: `${check}:${cand.id}:${weekKey}`,
@@ -152,27 +165,30 @@ function buildGroupedLetGo(items: NoticedAndLetGoItem[]): GroupedLetGoItem[] {
   const out: GroupedLetGoItem[] = [];
   for (const [key, groupItems] of groups.entries()) {
     const storeItems = groupItems.filter((i) => i.storeId !== undefined);
+    const uniqueStoreCount = new Set(storeItems.map((i) => i.storeId!)).size;
     const mostRecentDate = groupItems.reduce(
       (maxD, it) => (it.date > maxD ? it.date : maxD),
       groupItems[0].date,
     );
 
     let headline = groupItems[0].reason;
-    if (storeItems.length > 1) {
+    if (uniqueStoreCount > 1) {
       const checkKind = groupItems[0].checkKind;
       if (checkKind === 'calendar' && key.includes(':drop:')) {
-        headline = `Summer lull: sales fell at ${storeItems.length} stores, as they did last year`;
+        headline = `Summer lull: sales fell at ${uniqueStoreCount} stores, as they did last year`;
       } else if (checkKind === 'calendar' && key.includes(':lull_ended:')) {
-        headline = `Summer lull ended: sales jumped at ${storeItems.length} stores returning to baseline`;
+        headline = `Summer lull ended: sales jumped at ${uniqueStoreCount} stores returning to baseline`;
       } else if (checkKind === 'calendar') {
-        headline = `Trading calendar: sales shifted at ${storeItems.length} stores`;
+        headline = `Trading calendar: sales shifted at ${uniqueStoreCount} stores`;
       } else if (checkKind === 'stock_returned') {
         const match = groupItems[0].reason.match(/delivery of ([A-Za-z]+ \d+)/);
         const delDate = match ? match[1].trim() : '';
-        headline = `Stock returned${delDate ? ` after ${delDate} delivery` : ''}: sales jumped at ${storeItems.length} stores`;
+        headline = `Stock returned${delDate ? ` after ${delDate} delivery` : ''}: sales jumped at ${uniqueStoreCount} stores`;
       } else {
-        headline = `${groupItems[0].groupHeadline} (${storeItems.length} stores)`;
+        headline = `${groupItems[0].groupHeadline} (${uniqueStoreCount} stores)`;
       }
+    } else if (groupItems.length > 1) {
+      headline = groupItems[0].groupHeadline;
     }
 
     out.push({

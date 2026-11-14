@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ArrowLeft, Check, Play, X } from 'lucide-react';
-import { DiagnosticReport } from '../types/domain';
+import { BuilderRequirement, DiagnosticReport, RefundRecord, ToolTestCaseResult } from '../types/domain';
+import { runSandboxedToolTests } from '../builder/tester';
 
 interface ConnectionAttempt {
   model: string;
@@ -47,6 +48,19 @@ interface GatewayTestReport {
   cases: GatewayTestCase[];
 }
 
+interface BrokenToolRepairReport {
+  initialPassed: boolean;
+  initialResults: ToolTestCaseResult[];
+  repairModel: string;
+  repairMode: string;
+  repairLatencyMs: number;
+  repairSizeKb: string;
+  usedFallbackCopy: boolean;
+  repairedPassed: boolean;
+  repairedResults: ToolTestCaseResult[];
+  finalNotice: string;
+}
+
 export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) {
   const [testing, setTesting] = useState(false);
   const [connReport, setConnReport] = useState<ConnectionTestReport | null>(null);
@@ -54,6 +68,10 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
 
   const [gwTesting, setGwTesting] = useState(false);
   const [gwReport, setGwReport] = useState<GatewayTestReport | null>(null);
+
+  const [repairTesting, setRepairTesting] = useState(false);
+  const [repairReport, setRepairReport] = useState<BrokenToolRepairReport | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
 
   const handleRunConnectionTests = async () => {
     setTesting(true);
@@ -82,6 +100,72 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
       }
     } finally {
       setGwTesting(false);
+    }
+  };
+
+  const handleRunBrokenToolTest = async () => {
+    setRepairTesting(true);
+    setRepairError(null);
+    try {
+      const res = await fetch('/api/dev/broken-tool-test', { method: 'POST' });
+      const data = (await res.json()) as {
+        ok: boolean;
+        brokenHtml: string;
+        rows: RefundRecord[];
+        requirement: BuilderRequirement;
+        error?: string;
+      };
+      if (!res.ok || !data.ok) {
+        setRepairError(data.error ?? `HTTP ${res.status}`);
+        return;
+      }
+
+      const initialSuite = await runSandboxedToolTests(data.brokenHtml, data.rows);
+      const repairRes = await fetch('/api/builder/repair', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          seed: report.seed,
+          dayIndex: 63,
+          requirement: data.requirement,
+          brokenHtml: data.brokenHtml,
+          failureReasons: initialSuite.failureReasons,
+        }),
+      });
+      const repairData = await repairRes.json();
+      if (!repairRes.ok || !repairData.ok) {
+        setRepairError(repairData.error ?? `HTTP ${repairRes.status}`);
+        return;
+      }
+
+      const r = repairData.repairResult as {
+        html: string;
+        model: string;
+        mode: string;
+        latencyMs: number;
+        byteSize: number;
+        usedFallbackCopy: boolean;
+      };
+      const repairedSuite = await runSandboxedToolTests(r.html, data.rows);
+
+      setRepairReport({
+        initialPassed: initialSuite.allPassed,
+        initialResults: initialSuite.results,
+        repairModel: r.model,
+        repairMode: r.mode,
+        repairLatencyMs: r.latencyMs,
+        repairSizeKb: (r.byteSize / 1024).toFixed(1),
+        usedFallbackCopy: r.usedFallbackCopy,
+        repairedPassed: repairedSuite.allPassed,
+        repairedResults: repairedSuite.results,
+        finalNotice: repairedSuite.allPassed
+          ? 'Broken draft caught by sandbox tests, repaired once, and all 3 checks passed.'
+          : 'I could not build this to standard. Here is what failed.',
+      });
+    } catch (err) {
+      setRepairError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRepairTesting(false);
     }
   };
 
@@ -255,6 +339,84 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
                   </span>
                 </div>
               ))}
+            </div>
+          )}
+        </section>
+
+        {/* Stage 4 Broken-Tool & Single Repair Check Panel */}
+        <section
+          aria-labelledby="broken-tool-test-heading"
+          className="mt-6 bg-white border border-[#E6E1D8] rounded-xl p-5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 id="broken-tool-test-heading" className="text-base font-semibold text-[#171717]">
+                Check 5: Broken Tool + Single Repair Gate
+              </h2>
+              <p className="mt-1 text-xs text-[#57534E]">
+                Runs a deliberately broken Refund exceptions desk draft inside{' '}
+                <code>&lt;iframe sandbox=&quot;allow-scripts&quot;&gt;</code>, verifies the 3
+                checks catch its math/interaction bugs, asks Gemini to repair once, and re-tests.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunBrokenToolTest}
+              disabled={repairTesting}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{repairTesting ? 'Testing & repairing...' : 'Run broken-tool repair test'}</span>
+            </button>
+          </div>
+
+          {repairError && (
+            <div className="mt-4 p-3 rounded-lg bg-[#FEF2F2] border border-[#FECACA] text-xs font-mono text-[#991B1B]">
+              {repairError}
+            </div>
+          )}
+
+          {repairReport && (
+            <div className="mt-4 space-y-3 text-xs">
+              <div className="p-3 rounded-lg border border-[#E6E1D8] bg-[#FAF8F5] space-y-1.5">
+                <p className="font-semibold text-[#171717]">
+                  Step 1 · Deliberately broken draft:{' '}
+                  <span className={repairReport.initialPassed ? 'text-[#B45309]' : 'text-[#15803D]'}>
+                    {repairReport.initialPassed ? 'Unexpectedly passed' : 'Caught as broken'}
+                  </span>
+                </p>
+                <ul className="space-y-1">
+                  {repairReport.initialResults.map((r) => (
+                    <li key={`init-${r.id}`} className="text-[#57534E]">
+                      <span className={r.passed ? 'text-[#15803D]' : 'text-[#991B1B] font-medium'}>
+                        {r.passed ? 'passed' : 'failed'}
+                      </span>{' '}
+                      · {r.label} — {r.detail}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="p-3 rounded-lg border border-[#E6E1D8] bg-[#FAF8F5] space-y-1.5">
+                <p className="font-semibold text-[#171717]">
+                  Step 2 · Single repair ({repairReport.repairModel}, {repairReport.repairMode},{' '}
+                  {repairReport.repairLatencyMs} ms, {repairReport.repairSizeKb} KB
+                  {repairReport.usedFallbackCopy ? ' · Fallback copy, not built live.' : ''}):{' '}
+                  <span className={repairReport.repairedPassed ? 'text-[#15803D]' : 'text-[#991B1B]'}>
+                    {repairReport.finalNotice}
+                  </span>
+                </p>
+                <ul className="space-y-1">
+                  {repairReport.repairedResults.map((r) => (
+                    <li key={`rep-${r.id}`} className="text-[#57534E]">
+                      <span className={r.passed ? 'text-[#15803D] font-medium' : 'text-[#991B1B] font-medium'}>
+                        {r.passed ? 'passed' : 'failed'}
+                      </span>{' '}
+                      · {r.label} — {r.detail}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             </div>
           )}
         </section>

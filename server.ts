@@ -2,12 +2,21 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import {
+  buildRefundDeskHtml,
+  createDeliberatelyBrokenToolHtml,
+  repairRefundDeskHtml,
+} from './src/builder/builder';
+import { generateRefundDeskRequirement } from './src/builder/requirement';
 import { runSituationInvestigation } from './src/checker/checker';
-import { addDays } from './src/engine/calendar';
+import { addDays, formatShortDate } from './src/engine/calendar';
 import { DEFAULT_SEED } from './src/engine/prng';
 import { runSimulation } from './src/engine/simulation';
 import { buildLiveTimeline, runFullDiagnostics } from './src/engine/runner';
-import { evaluateStage2UpToDay } from './src/engine/stage2Timeline';
+import {
+  clearTimelineSnapshotCache,
+  evaluateStage2UpToDay,
+} from './src/engine/stage2Timeline';
 import { evaluateActionsUpToDate } from './src/followup/proof';
 import {
   clearGeminiMemoryCache,
@@ -22,9 +31,12 @@ import {
 } from './src/gateway/gateway';
 import {
   ActionDecision,
+  BuilderRequirement,
+  BuiltToolRecord,
   CardReaction,
   DismissReason,
   InvestigationResult,
+  TraceEntry,
 } from './src/types/domain';
 
 dotenv.config();
@@ -49,7 +61,7 @@ async function startServer() {
   app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'opscien-instinct', stage: 3 });
+    res.json({ ok: true, service: 'opscien-instinct', stage: 4 });
   });
 
   app.get('/api/day-one', async (_req, res) => {
@@ -102,6 +114,7 @@ async function startServer() {
   app.post('/api/dev/clear-cache', (_req, res) => {
     clearGeminiMemoryCache();
     clearGatewayAttemptLog();
+    clearTimelineSnapshotCache();
     res.json({ ok: true });
   });
 
@@ -120,6 +133,9 @@ async function startServer() {
         controlStores?: string[];
         investigateTargetDay?: boolean;
         completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
       };
       const result = await evaluateStage2UpToDay({
         seed: typeof body.seed === 'number' ? body.seed : DEFAULT_SEED,
@@ -129,6 +145,9 @@ async function startServer() {
         controlStores: new Set(Array.isArray(body.controlStores) ? body.controlStores : []),
         investigateTargetDay: Boolean(body.investigateTargetDay),
         providedInvestigations: toInvestigationMap(body.completedInvestigations),
+        builtTools: Array.isArray(body.builtTools) ? body.builtTools : [],
+        reviewedRefundIds: Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [],
+        builderTraceEntries: Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [],
       });
 
       res.json({
@@ -143,7 +162,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/timeline/next-event', (req, res) => {
+  app.post('/api/timeline/next-event', async (req, res) => {
     try {
       const body = (req.body ?? {}) as {
         seed?: number;
@@ -151,28 +170,71 @@ async function startServer() {
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
         controlStores?: string[];
+        openCandidateIds?: string[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
       };
       const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
-      const fromDayIndex = typeof body.fromDayIndex === 'number' ? body.fromDayIndex : 0;
+      const fromDayIndex = Math.max(0, typeof body.fromDayIndex === 'number' ? body.fromDayIndex : 0);
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
       const reactions = Array.isArray(body.reactions) ? body.reactions : [];
       const controlStores = new Set(Array.isArray(body.controlStores) ? body.controlStores : []);
+      const clientOpenIds = Array.isArray(body.openCandidateIds)
+        ? new Set(body.openCandidateIds)
+        : null;
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries)
+        ? body.builderTraceEntries
+        : [];
 
       const timeline = buildLiveTimeline(seed, decisions, controlStores);
-      const baseCount = timeline.dayStates[fromDayIndex]?.trace.length ?? 0;
+      const clampedFrom = Math.min(timeline.dayStates.length - 1, fromDayIndex);
+      const baseState = timeline.dayStates[clampedFrom];
+
       const handledRollouts = new Set(
         reactions
           .filter((r) => r.candidateId.startsWith('rollout:') && r.reaction !== 'not_now')
           .map((r) => r.candidateId),
       );
+      const closedIdsAtFrom = new Set(
+        reactions
+          .filter((r) => r.reaction === 'approve' || r.reaction === 'dismiss')
+          .map((r) => r.candidateId),
+      );
+      const deferredIdsAtFrom = new Set(
+        reactions
+          .filter((r) => r.reaction === 'not_now')
+          .map((r) => r.candidateId),
+      );
+      const baseRaisedIds = new Set(baseState?.raised.map((r) => r.candidateId) ?? []);
+      const baseLetGoGroupIds = new Set(baseState?.groupedLetGo.map((g) => g.id) ?? []);
+
+      // Detect Stage 1 raised candidates that Stage 2 Watcher is still "keep_watching" (not yet raised to user)
+      const unraisedWatchIds = clientOpenIds
+        ? new Set(
+            (baseState?.raised ?? [])
+              .filter(
+                (r) =>
+                  !clientOpenIds.has(r.candidateId) &&
+                  !closedIdsAtFrom.has(r.candidateId) &&
+                  !deferredIdsAtFrom.has(r.candidateId) &&
+                  !r.groundTruth?.startsWith('near_miss:'),
+              )
+              .map((r) => r.candidateId),
+          )
+        : new Set<string>();
+
       const prevFollow = evaluateActionsUpToDate({
         sim: timeline.sim,
         decisions,
-        date: timeline.dayStates[fromDayIndex]?.date ?? timeline.sim.liveDates[0],
+        date: baseState?.date ?? timeline.sim.liveDates[0],
         handledRolloutIds: handledRollouts,
       });
 
-      // Detect currently active deferred stock items (not subsequently approved/dismissed) that may lose sales for 3 days running
       const latestByCandidate = new Map<string, CardReaction>();
       for (const r of reactions) {
         latestByCandidate.set(r.candidateId, r);
@@ -191,15 +253,30 @@ async function startServer() {
       let nextDayIndex: number | null = null;
       let consecLostAfterDefer = 0;
 
-      for (let i = fromDayIndex + 1; i < timeline.dayStates.length; i++) {
+      for (let i = clampedFrom + 1; i < timeline.dayStates.length; i++) {
         const ds = timeline.dayStates[i];
         const d = ds.date;
 
-        if (ds.trace.length > baseCount) {
+        // 1. New situation raised that is not a near-miss / not already open or handled
+        const hasNewMaterialRaise = ds.raised.some(
+          (r) =>
+            !baseRaisedIds.has(r.candidateId) &&
+            !closedIdsAtFrom.has(r.candidateId) &&
+            !r.groundTruth?.startsWith('near_miss:'),
+        );
+        // 2. New distinct grouped let-go event (calendar or stock_returned)
+        const hasNewLetGoGroup = ds.groupedLetGo.some(
+          (g) =>
+            !baseLetGoGroupIds.has(g.id) &&
+            (g.checkKind === 'calendar' || g.checkKind === 'stock_returned'),
+        );
+
+        if (hasNewMaterialRaise || hasNewLetGoGroup) {
           nextDayIndex = i;
           break;
         }
 
+        // 3. Follow-up milestones, checkpoints, completions, arrivals, or rollout cards
         const curFollow = evaluateActionsUpToDate({
           sim: timeline.sim,
           decisions,
@@ -216,6 +293,7 @@ async function startServer() {
           break;
         }
 
+        // 4. Deferred stock card losing sales for 3 days running
         if (latestDeferDate && d > latestDeferDate) {
           const recs = timeline.sim.storeRecordsByDate[d];
           const lostAny = Object.values(recs).some(
@@ -228,7 +306,37 @@ async function startServer() {
             break;
           }
         }
+
+        // 5. If Stage 2 Watcher kept watching an unclosed Stage 1 anomaly on `fromDayIndex`,
+        // check whether Stage 2 raises it on day `i` so Skip never jumps past e.g. Oct 3 Walnut Creek refunds
+        if (unraisedWatchIds.size > 0 && ds.raised.some((r) => unraisedWatchIds.has(r.candidateId))) {
+          const s2 = await evaluateStage2UpToDay({
+            seed,
+            targetDayIndex: i,
+            decisions,
+            reactions,
+            controlStores,
+            investigateTargetDay: false,
+            providedInvestigations: provided,
+            builtTools,
+            reviewedRefundIds,
+            builderTraceEntries,
+          });
+          if (s2.dayState.raised.some((r) => unraisedWatchIds.has(r.candidateId))) {
+            nextDayIndex = i;
+            break;
+          }
+        }
       }
+
+      if (nextDayIndex === null && clampedFrom < timeline.dayStates.length - 1) {
+        nextDayIndex = timeline.dayStates.length - 1;
+      }
+      if (typeof nextDayIndex === 'number' && nextDayIndex <= clampedFrom) {
+        nextDayIndex =
+          clampedFrom < timeline.dayStates.length - 1 ? clampedFrom + 1 : null;
+      }
+
       res.json({ nextDayIndex });
     } catch (err) {
       res.status(500).json({
@@ -246,12 +354,18 @@ async function startServer() {
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
       };
       const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
       const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
       const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
 
       const preStep = await evaluateStage2UpToDay({
         seed,
@@ -260,6 +374,9 @@ async function startServer() {
         reactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       const targetItem = preStep.dayState.raised.find((r) => r.candidateId === body.candidateId);
@@ -327,6 +444,9 @@ async function startServer() {
         reactions: updatedReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       res.json({
@@ -355,12 +475,18 @@ async function startServer() {
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
       };
       const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
       const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
       const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
 
       const sim = runSimulation(seed, decisions);
       const date = sim.liveDates[Math.max(0, Math.min(sim.liveDates.length - 1, dayIndex))];
@@ -381,6 +507,9 @@ async function startServer() {
         reactions: updatedReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       res.json({
@@ -406,12 +535,18 @@ async function startServer() {
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
       };
       const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
       const reactions = Array.isArray(body.reactions) ? body.reactions : [];
       const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
 
       const preStep = await evaluateStage2UpToDay({
         seed,
@@ -420,6 +555,9 @@ async function startServer() {
         reactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       const targetItem = preStep.dayState.raised.find((r) => r.candidateId === body.candidateId);
@@ -443,6 +581,9 @@ async function startServer() {
         reactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       res.json({
@@ -450,6 +591,494 @@ async function startServer() {
         investigation: freshInv,
         dayState: postStep.dayState,
         usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/action/store-manager', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        candidateId: string;
+        decisions?: ActionDecision[];
+        reactions?: CardReaction[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
+      const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
+
+      const preStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions,
+        reactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      const currentDate = preStep.dayState.date;
+      const dueDate = addDays(currentDate, 3);
+      const gwResult = executeActionThroughGateway(
+        {
+          candidateId: body.candidateId,
+          date: currentDate,
+          kind: 'store_manager_task',
+          storeId: 'walnut_creek',
+          dueDate,
+          title: 'Ask Walnut Creek store manager about Till 2 cash refunds after 8 pm',
+          measure: `Simulated question logged (due ${formatShortDate(dueDate)})`,
+          ownerApproved: true,
+          approvedBy: 'Owner',
+        },
+        preStep.sim,
+      );
+
+      if (!gwResult.ok || !gwResult.decision) {
+        res.status(400).json({
+          ok: false,
+          refusalReason: gwResult.refusalReason ?? 'Action refused by gateway.',
+        });
+        return;
+      }
+
+      const updatedDecisions = [...decisions, gwResult.decision];
+      const postStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions: updatedDecisions,
+        reactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      res.json({
+        ok: true,
+        decision: gwResult.decision,
+        dayState: postStep.dayState,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/builder/requirement', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        candidateId: string;
+        decisions?: ActionDecision[];
+        reactions?: CardReaction[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? body.decisions : [];
+      const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+
+      const step = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions,
+        reactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+      });
+
+      const targetItem = step.dayState.raised.find((r) => r.candidateId === body.candidateId);
+      if (!targetItem) {
+        res.status(404).json({ ok: false, error: 'Card not found for requirement.' });
+        return;
+      }
+
+      const requirement = await generateRefundDeskRequirement({
+        situation: targetItem,
+        sim: step.sim,
+        date: step.dayState.date,
+      });
+
+      const traceEntry: TraceEntry = {
+        id: `trace:${step.dayState.date}:dev:req:${targetItem.candidateId}:${Date.now()}`,
+        date: step.dayState.date,
+        lane: 'developer',
+        kind: 'builder',
+        headline: `Requirement written: ${requirement.title}`,
+        detail: `${requirement.model} (${requirement.mode}, ${requirement.latencyMs} ms${requirement.mode === 'replayed' ? ' replayed' : ''}). ${requirement.plainSummary.purpose}`,
+        outcome: 'info',
+        meta: {
+          model: requirement.model,
+          mode: requirement.mode,
+          latencyMs: requirement.latencyMs,
+        },
+      };
+
+      res.json({
+        ok: true,
+        requirement,
+        traceEntry,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/builder/build', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        requirement: BuilderRequirement;
+        decisions?: ActionDecision[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? body.decisions : [];
+
+      const sim = runSimulation(seed, decisions);
+      const date = sim.liveDates[Math.max(0, Math.min(sim.liveDates.length - 1, dayIndex))];
+      const windowStart = addDays(date, -34);
+      const rows = sim.walnutCreekRefunds.filter((r) => r.date >= windowStart && r.date <= date);
+
+      const buildResult = await buildRefundDeskHtml({
+        requirement: body.requirement,
+        sampleRows: rows,
+      });
+
+      const sizeKb = (buildResult.byteSize / 1024).toFixed(1);
+      const traceEntry: TraceEntry = {
+        id: `trace:${date}:dev:build:${Date.now()}`,
+        date,
+        lane: 'developer',
+        kind: 'builder',
+        headline: buildResult.usedFallbackCopy
+          ? `Tool written from fallback copy (${sizeKb} KB)`
+          : `Tool written by ${buildResult.model} (${sizeKb} KB)`,
+        detail: buildResult.usedFallbackCopy
+          ? `Fallback copy, not built live.${buildResult.errorNote ? ` (${buildResult.errorNote})` : ''}`
+          : `Single-file HTML written in ${buildResult.latencyMs} ms${buildResult.mode === 'replayed' ? ' (replayed)' : ''} · ${buildResult.inputTokens} in / ${buildResult.outputTokens} out tokens.`,
+        outcome: buildResult.usedFallbackCopy ? 'let_go' : 'info',
+        meta: {
+          model: buildResult.model,
+          mode: buildResult.mode,
+          latencyMs: buildResult.latencyMs,
+        },
+      };
+
+      res.json({
+        ok: true,
+        buildResult,
+        rows,
+        date,
+        traceEntry,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/builder/repair', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        requirement: BuilderRequirement;
+        brokenHtml: string;
+        failureReasons: string[];
+        decisions?: ActionDecision[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? body.decisions : [];
+
+      const sim = runSimulation(seed, decisions);
+      const date = sim.liveDates[Math.max(0, Math.min(sim.liveDates.length - 1, dayIndex))];
+      const windowStart = addDays(date, -34);
+      const rows = sim.walnutCreekRefunds.filter((r) => r.date >= windowStart && r.date <= date);
+
+      const repairResult = await repairRefundDeskHtml({
+        brokenHtml: body.brokenHtml,
+        failureReasons: body.failureReasons,
+        requirement: body.requirement,
+        sampleRows: rows,
+      });
+
+      const traceEntry: TraceEntry = {
+        id: `trace:${date}:dev:repair:${Date.now()}`,
+        date,
+        lane: 'developer',
+        kind: 'builder',
+        headline: `Asked Gemini to repair tool once (${(repairResult.byteSize / 1024).toFixed(1)} KB)`,
+        detail: `Failure reasons sent to ${repairResult.model}: ${body.failureReasons.join(' | ')}`,
+        outcome: 'info',
+        meta: {
+          model: repairResult.model,
+          mode: repairResult.mode,
+          latencyMs: repairResult.latencyMs,
+        },
+      };
+
+      res.json({
+        ok: true,
+        repairResult,
+        traceEntry,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/builder/install', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        candidateId: string;
+        builtTool: BuiltToolRecord;
+        decisions?: ActionDecision[];
+        reactions?: CardReaction[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? body.decisions : [];
+      const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const priorTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? [...body.builderTraceEntries] : [];
+
+      const sim = runSimulation(seed, decisions);
+      const date = sim.liveDates[Math.max(0, Math.min(sim.liveDates.length - 1, dayIndex))];
+      const newReaction: CardReaction = {
+        id: `react:${body.candidateId}:${date}:approve_tool:${reactions.length}`,
+        candidateId: body.candidateId,
+        date,
+        dayIndex,
+        reaction: 'approve',
+        detail: `Installed ${body.builtTool.title} after passing all 3 sandbox tests.`,
+      };
+      const updatedReactions = [...reactions, newReaction];
+      const updatedTools = [
+        ...priorTools.filter((t) => t.id !== body.builtTool.id),
+        body.builtTool,
+      ];
+
+      const testSummary = body.builtTool.testResults
+        .map((t) => `${t.label}: ${t.passed ? 'passed' : 'failed'}`)
+        .join(' · ');
+      builderTraceEntries.push({
+        id: `trace:${date}:dev:tests:${body.builtTool.id}`,
+        date,
+        lane: 'developer',
+        kind: 'builder',
+        headline: `Tool verified & installed: ${body.builtTool.title}`,
+        detail: `${testSummary}${body.builtTool.usedFallbackCopy ? ' · Fallback copy, not built live.' : ''}`,
+        outcome: 'raised',
+        meta: {
+          model: body.builtTool.model,
+          mode: body.builtTool.mode,
+          latencyMs: body.builtTool.latencyMs,
+        },
+      });
+
+      const postStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions,
+        reactions: updatedReactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools: updatedTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      res.json({
+        ok: true,
+        reaction: newReaction,
+        builtTools: updatedTools,
+        builderTraceEntries,
+        dayState: postStep.dayState,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/builder/switch-approve', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        candidateId: string;
+        toolId: string;
+        decisions?: ActionDecision[];
+        reactions?: CardReaction[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
+      const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
+
+      const preStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions,
+        reactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      const currentDate = preStep.dayState.date;
+      const gwResult = executeActionThroughGateway(
+        {
+          candidateId: body.candidateId,
+          date: currentDate,
+          kind: 'refund_switch',
+          storeId: 'walnut_creek',
+          toolId: body.toolId,
+          title: 'Require manager approval for cash refunds over $50 at Walnut Creek',
+          measure: 'Walnut Creek 21-day cash refund rate before vs after switch',
+          ownerApproved: true,
+          approvedBy: 'Owner',
+        },
+        preStep.sim,
+      );
+
+      if (!gwResult.ok || !gwResult.decision) {
+        res.status(400).json({
+          ok: false,
+          refusalReason: gwResult.refusalReason ?? 'Action refused by gateway.',
+        });
+        return;
+      }
+
+      const updatedDecisions = [...decisions, gwResult.decision];
+      const postStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions: updatedDecisions,
+        reactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      res.json({
+        ok: true,
+        decision: gwResult.decision,
+        dayState: postStep.dayState,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/dev/broken-tool-test', async (req, res) => {
+    try {
+      const sim = runSimulation(DEFAULT_SEED, []);
+      const testDate = '2026-10-03';
+      const windowStart = addDays(testDate, -34);
+      const rows = sim.walnutCreekRefunds.filter((r) => r.date >= windowStart && r.date <= testDate);
+      const brokenHtml = createDeliberatelyBrokenToolHtml();
+      const requirement = {
+        situationId: 'situation:refunds_out_of_line:walnut_creek',
+        title: 'Refund exceptions desk',
+        generatedOn: testDate,
+        purpose: [{ type: 'text' as const, text: 'Isolate and stop unlinked late-evening cash refunds at Walnut Creek.' }],
+        users: [{ type: 'text' as const, text: 'Finance lead and owner.' }],
+        shows: [{ type: 'text' as const, text: 'Thirty-five days of Walnut Creek refund records with Till two operator fourteen flagged.' }],
+        actions: [{ type: 'text' as const, text: 'Mark reviewed and require manager approval for cash refunds above threshold.' }],
+        verification: [{ type: 'text' as const, text: 'Loads cleanly, matches flagged count/total, and responds to mark-reviewed.' }],
+        plainSummary: {
+          purpose: 'Isolate and stop unlinked late-evening cash refunds at Walnut Creek.',
+          users: 'Finance lead and owner.',
+          shows: '35 days of Walnut Creek refund records with Till 2 operator 14 flagged.',
+          actions: 'Mark reviewed and require manager approval for cash refunds over $50.',
+          verification: 'Loads cleanly, matches flagged count/total, and responds to mark-reviewed.',
+        },
+        factsById: {},
+        model: 'dev-test',
+        mode: 'fallback' as const,
+        latencyMs: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        usedFallbackWording: true,
+      };
+      void req;
+      res.json({
+        ok: true,
+        brokenHtml,
+        rows,
+        requirement,
       });
     } catch (err) {
       res.status(500).json({
@@ -478,6 +1107,9 @@ async function startServer() {
         controlStores?: string[];
         situationId?: string;
         completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
       };
 
       const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
@@ -486,6 +1118,9 @@ async function startServer() {
       const reactions = Array.isArray(body.reactions) ? body.reactions : [];
       const controlStores = new Set(Array.isArray(body.controlStores) ? body.controlStores : []);
       const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
 
       const preStep = await evaluateStage2UpToDay({
         seed,
@@ -495,6 +1130,9 @@ async function startServer() {
         controlStores,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       const targetSituation =
@@ -532,6 +1170,9 @@ async function startServer() {
         controlStores,
         investigateTargetDay: false,
         providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
       });
 
       sendEvent('done', {

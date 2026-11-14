@@ -1,6 +1,12 @@
 import { useState } from 'react';
-import { Check, ChevronDown, ChevronUp, Loader2 } from 'lucide-react';
-import { DayState, DismissReason, Fact, TextSegment } from '../types/domain';
+import { Check, ChevronDown, ChevronUp, Loader2, Wrench, X } from 'lucide-react';
+import {
+  BuilderRequirement,
+  DayState,
+  DismissReason,
+  Fact,
+  TextSegment,
+} from '../types/domain';
 import { formatShortDate } from '../engine/calendar';
 import { createFact } from '../engine/facts';
 import { FactValue } from './FactValue';
@@ -12,15 +18,29 @@ export interface ActiveInvestigationBanner {
   steps: string[];
 }
 
+export interface BuilderErrorState {
+  message: string;
+  failures: string[];
+}
+
 interface OwnerFeedProps {
   dayState: DayState;
   activeInvestigation?: ActiveInvestigationBanner | null;
   actionBusyId?: string | null;
+  isRequestInFlight?: boolean;
+  pendingRequirements?: Record<string, BuilderRequirement>;
+  builderProgressByCandidate?: Record<string, string>;
+  builderErrorByCandidate?: Record<string, BuilderErrorState>;
   onInspectFact: (fact: Fact) => void;
   onApproveCard?: (candidateId: string) => void;
   onNotNowCard?: (candidateId: string) => void;
   onDismissCard?: (candidateId: string, reason: DismissReason) => void;
   onLookAgainCard?: (candidateId: string) => void;
+  onStartBuildRequirement?: (candidateId: string) => void;
+  onConfirmBuildTool?: (candidateId: string) => void;
+  onCancelRequirement?: (candidateId: string) => void;
+  onAskStoreManager?: (candidateId: string) => void;
+  onOpenBuiltTool?: (toolId: string) => void;
 }
 
 const DISMISS_REASONS: Array<{ value: DismissReason; label: string }> = [
@@ -44,11 +64,20 @@ export function OwnerFeed({
   dayState,
   activeInvestigation,
   actionBusyId,
+  isRequestInFlight = false,
+  pendingRequirements = {},
+  builderProgressByCandidate = {},
+  builderErrorByCandidate = {},
   onInspectFact,
   onApproveCard,
   onNotNowCard,
   onDismissCard,
   onLookAgainCard,
+  onStartBuildRequirement,
+  onConfirmBuildTool,
+  onCancelRequirement,
+  onAskStoreManager,
+  onOpenBuiltTool,
 }: OwnerFeedProps) {
   const [letGoExpanded, setLetGoExpanded] = useState(false);
   const [openEvidenceIds, setOpenEvidenceIds] = useState<Record<string, boolean>>({});
@@ -125,6 +154,7 @@ export function OwnerFeed({
               const evOpen = !!openEvidenceIds[item.candidateId];
               const isCardOpen = !collapsedCardIds[item.candidateId];
               const isBusy = actionBusyId === item.candidateId;
+              const buttonsDisabled = isBusy || isRequestInFlight;
               const isDismissOpen = dismissPickerId === item.candidateId;
               const hasToday =
                 !!item.todayDate &&
@@ -137,6 +167,16 @@ export function OwnerFeed({
               const sc = item.secondCheck ?? inv?.secondCheck;
               const plan = item.transferPlan ?? inv?.transferPlan;
               const checksDisagree = sc?.status === 'disagreed';
+              const isToolToBuild = inv?.outcomeKind === 'tool_to_build';
+              const pendingReq = pendingRequirements[item.candidateId];
+              const buildProgress = builderProgressByCandidate[item.candidateId];
+              const buildErr = builderErrorByCandidate[item.candidateId];
+              const askedManagerAct = (dayState.inProgress ?? []).find(
+                (a) => a.candidateId === item.candidateId && a.isSimulatedTask,
+              );
+              const doneManagerAct = (dayState.doneForYou ?? []).find(
+                (d) => d.candidateId === item.candidateId,
+              );
 
               return (
                 <div key={item.candidateId} className="p-4" data-card-id={item.candidateId}>
@@ -403,70 +443,194 @@ export function OwnerFeed({
                         </p>
                       )}
 
-                      {/* Action Buttons: Approve (or Look again if checks disagree), Not now, Dismiss */}
-                      <div className="mt-3 pt-3 border-t border-[#F3F0EA] space-y-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          {checksDisagree ? (
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => onLookAgainCard?.(item.candidateId)}
-                              className="px-3.5 py-1.5 bg-[#B45309] hover:bg-[#92400E] disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                            >
-                              {isBusy ? 'Rechecking...' : 'Look again'}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => onApproveCard?.(item.candidateId)}
-                              className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                            >
-                              {isBusy ? 'Working...' : 'Approve'}
-                            </button>
+                      {/* Builder Requirement & Progress / Failure panel (Stage 4) */}
+                      {isToolToBuild && pendingReq && (
+                        <div
+                          data-testid="builder-requirement-panel"
+                          className="mt-3 p-3.5 rounded-lg bg-[#F5F7FF] border border-[#C7D2FE] text-xs space-y-2"
+                        >
+                          <div className="flex flex-wrap items-baseline justify-between gap-2">
+                            <span className="font-semibold text-[#312E81]">
+                              Requirement: {pendingReq.title}
+                            </span>
+                            <span className="font-mono text-[11px] text-[#57534E]">
+                              {pendingReq.model} ({pendingReq.mode}, {pendingReq.latencyMs} ms
+                              {pendingReq.mode === 'replayed' ? ' replayed' : ''})
+                              {pendingReq.usedFallbackWording ? ' · Fallback copy' : ''}
+                            </span>
+                          </div>
+                          <dl className="space-y-1.5 text-[#171717]">
+                            <div>
+                              <dt className="font-semibold text-[#57534E]">Purpose</dt>
+                              <dd className="leading-relaxed">
+                                {renderSegments(pendingReq.purpose, onInspectFact)}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="font-semibold text-[#57534E]">Who uses it</dt>
+                              <dd className="leading-relaxed">
+                                {renderSegments(pendingReq.users, onInspectFact)}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="font-semibold text-[#57534E]">What it shows</dt>
+                              <dd className="leading-relaxed">
+                                {renderSegments(pendingReq.shows, onInspectFact)}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="font-semibold text-[#57534E]">Actions inside tool</dt>
+                              <dd className="leading-relaxed">
+                                {renderSegments(pendingReq.actions, onInspectFact)}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt className="font-semibold text-[#57534E]">Checks before handover</dt>
+                              <dd className="leading-relaxed">
+                                {renderSegments(pendingReq.verification, onInspectFact)}
+                              </dd>
+                            </div>
+                          </dl>
+
+                          {buildProgress && (
+                            <div className="flex items-center gap-2 p-2 rounded bg-white border border-[#C7D2FE] text-[#312E81] font-medium">
+                              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                              <span>{buildProgress}</span>
+                            </div>
                           )}
 
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => onNotNowCard?.(item.candidateId)}
-                            className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-60 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                          >
-                            Not now
-                          </button>
+                          {buildErr && (
+                            <div
+                              role="alert"
+                              className="p-2.5 rounded bg-[#FEF2F2] border border-[#FECACA] text-[#991B1B] space-y-1"
+                            >
+                              <p className="font-semibold">{buildErr.message}</p>
+                              <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
+                                {buildErr.failures.map((f, i) => (
+                                  <li key={`bfail-${i}`}>{f}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
 
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() =>
-                              setDismissPickerId(isDismissOpen ? null : item.candidateId)
-                            }
-                            className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-60 text-[#57534E] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-
-                        {isDismissOpen && (
-                          <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-[#E6E1D8] flex flex-wrap items-center gap-1.5">
-                            <span className="text-[11px] text-[#57534E] mr-1">Why?</span>
-                            {DISMISS_REASONS.map((r) => (
-                              <button
-                                key={r.value}
-                                type="button"
-                                disabled={isBusy}
-                                onClick={() => {
-                                  setDismissPickerId(null);
-                                  onDismissCard?.(item.candidateId, r.value);
-                                }}
-                                className="px-2 py-1 text-[11px] font-medium bg-white hover:bg-[#F3F0EA] border border-[#E6E1D8] rounded text-[#171717] cursor-pointer"
-                              >
-                                {r.label}
-                              </button>
-                            ))}
+                          <div className="pt-1 flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() => onConfirmBuildTool?.(item.candidateId)}
+                              className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                            >
+                              {buildProgress ? 'Building & testing...' : 'Build it'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() => onCancelRequirement?.(item.candidateId)}
+                              className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                            >
+                              Not now
+                            </button>
                           </div>
-                        )}
-                      </div>
+                        </div>
+                      )}
+
+                      {/* Action Buttons */}
+                      {!(isToolToBuild && pendingReq) && (
+                        <div className="mt-3 pt-3 border-t border-[#F3F0EA] space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {checksDisagree ? (
+                              <button
+                                type="button"
+                                disabled={buttonsDisabled}
+                                onClick={() => onLookAgainCard?.(item.candidateId)}
+                                className="px-3.5 py-1.5 bg-[#B45309] hover:bg-[#92400E] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                              >
+                                {isBusy ? 'Rechecking...' : 'Look again'}
+                              </button>
+                            ) : isToolToBuild ? (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={buttonsDisabled}
+                                  onClick={() => onStartBuildRequirement?.(item.candidateId)}
+                                  className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                                >
+                                  {isBusy ? 'Drafting requirement...' : 'Build'}
+                                </button>
+
+                                {askedManagerAct ? (
+                                  <span className="px-2.5 py-1.5 bg-[#FAF8F5] border border-[#E6E1D8] text-[#57534E] text-[11px] font-medium rounded-lg">
+                                    Asked store manager · due {formatShortDate(askedManagerAct.endDate)}{' '}
+                                    (simulated)
+                                  </span>
+                                ) : doneManagerAct ? (
+                                  <span className="px-2.5 py-1.5 bg-[#FAF8F5] border border-[#E6E1D8] text-[#57534E] text-[11px] font-medium rounded-lg">
+                                    Store manager follow-up closed
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={buttonsDisabled}
+                                    onClick={() => onAskStoreManager?.(item.candidateId)}
+                                    className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                                  >
+                                    Ask store manager
+                                  </button>
+                                )}
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={buttonsDisabled}
+                                onClick={() => onApproveCard?.(item.candidateId)}
+                                className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                              >
+                                {isBusy ? 'Working...' : 'Approve'}
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() => onNotNowCard?.(item.candidateId)}
+                              className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                            >
+                              Not now
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() =>
+                                setDismissPickerId(isDismissOpen ? null : item.candidateId)
+                              }
+                              className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#57534E] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+
+                          {isDismissOpen && (
+                            <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-[#E6E1D8] flex flex-wrap items-center gap-1.5">
+                              <span className="text-[11px] text-[#57534E] mr-1">Why?</span>
+                              {DISMISS_REASONS.map((r) => (
+                                <button
+                                  key={r.value}
+                                  type="button"
+                                  disabled={buttonsDisabled}
+                                  onClick={() => {
+                                    setDismissPickerId(null);
+                                    onDismissCard?.(item.candidateId, r.value);
+                                  }}
+                                  className="px-2 py-1 text-[11px] font-medium bg-white hover:bg-[#F3F0EA] disabled:opacity-50 border border-[#E6E1D8] rounded text-[#171717] cursor-pointer"
+                                >
+                                  {r.label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* Linked supporting evidence */}
                       {evidenceList.length > 0 && (
@@ -575,12 +739,33 @@ export function OwnerFeed({
                 className="bg-white border border-[#E6E1D8] rounded-lg px-3.5 py-2.5 text-xs space-y-1"
               >
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="font-semibold text-[#171717]">{act.title}</span>
+                  <span className="font-semibold text-[#171717]">
+                    {act.title}
+                    {act.isSimulatedTask && (
+                      <span className="ml-1.5 font-normal text-[#78716C]">(simulated)</span>
+                    )}
+                  </span>
                   <span className="font-mono text-[11px] text-[#78716C] shrink-0">
                     Ends {formatShortDate(act.endDate)}
                   </span>
                 </div>
                 <p className="text-[#57534E]">{act.measure}</p>
+                {(act.beforeRefundRateFact || act.afterRefundRateFact) && (
+                  <p className="text-[#57534E]">
+                    {act.beforeRefundRateFact && (
+                      <>
+                        Before:{' '}
+                        <FactValue fact={act.beforeRefundRateFact} onInspect={onInspectFact} />
+                      </>
+                    )}
+                    {act.afterRefundRateFact && (
+                      <>
+                        {' · '}After:{' '}
+                        <FactValue fact={act.afterRefundRateFact} onInspect={onInspectFact} />
+                      </>
+                    )}
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#312E81]">
                   <span>{act.statusText}</span>
                   <span className="font-mono text-[#78716C]">{act.nextCheckpoint}</span>
@@ -613,7 +798,7 @@ export function OwnerFeed({
                 </div>
                 <p
                   className={`font-medium ${
-                    item.verdict === 'worked_proven'
+                    item.verdict === 'worked_proven' || item.verdict === 'worked_before_after'
                       ? 'text-[#15803D]'
                       : item.verdict === 'did_not_work'
                         ? 'text-[#991B1B]'
@@ -622,6 +807,23 @@ export function OwnerFeed({
                 >
                   {item.verdictSentence}
                 </p>
+                {item.detailSentence && <p className="text-[#57534E]">{item.detailSentence}</p>}
+                {(item.beforeRefundRateFact || item.afterRefundRateFact) && (
+                  <p className="text-[#57534E]">
+                    {item.beforeRefundRateFact && (
+                      <>
+                        Before:{' '}
+                        <FactValue fact={item.beforeRefundRateFact} onInspect={onInspectFact} />
+                      </>
+                    )}
+                    {item.afterRefundRateFact && (
+                      <>
+                        {' · '}After:{' '}
+                        <FactValue fact={item.afterRefundRateFact} onInspect={onInspectFact} />
+                      </>
+                    )}
+                  </p>
+                )}
                 {item.provenMoneyFact && (
                   <p className="text-[#57534E]">
                     Proven gain:{' '}
@@ -749,10 +951,89 @@ export function OwnerFeed({
 
       {/* 5. Tools I built */}
       <section aria-labelledby="section-tools" className="pt-5 border-t border-[#E6E1D8]">
-        <h2 id="section-tools" className="text-sm font-semibold text-[#171717]">
-          Tools I built
-        </h2>
-        <p className="mt-2 text-sm text-[#78716C]">Nothing yet.</p>
+        <div className="flex items-baseline justify-between">
+          <h2 id="section-tools" className="text-sm font-semibold text-[#171717]">
+            Tools I built
+          </h2>
+          {(dayState.builtTools?.length ?? 0) > 0 && (
+            <span className="text-xs font-mono tabular-nums text-[#312E81]">
+              {dayState.builtTools!.length} installed
+            </span>
+          )}
+        </div>
+        {!dayState.builtTools || dayState.builtTools.length === 0 ? (
+          <p className="mt-2 text-sm text-[#78716C]">Nothing yet.</p>
+        ) : (
+          <ul className="mt-2 space-y-2.5">
+            {dayState.builtTools.map((tool) => (
+              <li
+                key={tool.id}
+                className="bg-white border border-[#E6E1D8] rounded-xl p-3.5 text-xs space-y-2"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5 font-semibold text-[#171717]">
+                      <Wrench className="w-3.5 h-3.5 text-[#312E81] shrink-0" />
+                      <span>{tool.title}</span>
+                    </div>
+                    <p className="mt-0.5 text-[#57534E]">
+                      {tool.storeName} · Installed {formatShortDate(tool.installedOn)} ·{' '}
+                      <span className="font-mono">
+                        {tool.model} ({tool.latencyMs} ms, {tool.mode})
+                      </span>
+                    </p>
+                    {tool.usedFallbackCopy && (
+                      <p className="mt-1 inline-block px-1.5 py-0.5 rounded bg-[#FEF3C7] border border-[#FDE68A] text-[#92400E] font-medium">
+                        Fallback copy, not built live.
+                      </p>
+                    )}
+                    {tool.repairedOnce && (
+                      <p className="mt-0.5 text-[#B45309]">Repaired once and passed</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onOpenBuiltTool?.(tool.id)}
+                    className="px-3 py-1.5 bg-[#312E81] hover:bg-[#26236B] text-white text-xs font-semibold rounded-lg transition-colors shrink-0 cursor-pointer"
+                  >
+                    Open tool
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-1 text-[#57534E]">
+                  {dayState.toolUnreviewedFact && (
+                    <span>
+                      Unreviewed flagged:{' '}
+                      <FactValue fact={dayState.toolUnreviewedFact} onInspect={onInspectFact} />
+                    </span>
+                  )}
+                  <span>
+                    Approval rule:{' '}
+                    <strong className="text-[#171717]">
+                      {dayState.refundSwitchEnabled ? 'Active' : 'Off'}
+                    </strong>
+                  </span>
+                </div>
+
+                <ul className="pt-1.5 border-t border-[#F3F0EA] space-y-1">
+                  {tool.testResults.map((tr) => (
+                    <li key={tr.id} className="flex items-center gap-1.5 text-[11px] text-[#57534E]">
+                      {tr.passed ? (
+                        <Check className="w-3 h-3 text-[#15803D] shrink-0" />
+                      ) : (
+                        <X className="w-3 h-3 text-[#991B1B] shrink-0" />
+                      )}
+                      <span className={tr.passed ? 'text-[#15803D] font-medium' : 'text-[#991B1B]'}>
+                        {tr.passed ? 'passed' : 'failed'}
+                      </span>
+                      <span>· {tr.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       {/* 6. Record */}

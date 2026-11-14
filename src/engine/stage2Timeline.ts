@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { computeExpectedFlaggedStats } from '../builder/builder';
 import { runSituationInvestigation } from '../checker/checker';
 import { buildTransferPlanForGroup } from '../checker/transferPlan';
 import { runDetectorsForDay } from '../detectors/detectors';
@@ -8,6 +10,7 @@ import { evaluateWatcherBatch, WatcherSubjectOutcome } from '../watcher/watcher'
 import { WatcherSubject } from '../watcher/briefing';
 import {
   ActionDecision,
+  BuiltToolRecord,
   Candidate,
   CardReaction,
   DayState,
@@ -161,6 +164,20 @@ function buildLetGoMeta(
     };
   }
 
+  if (check === 'already_handled') {
+    const isControl = reason.toLowerCase().includes('control store');
+    return {
+      weekKey,
+      groupSummaryKey: isControl
+        ? `already_handled:control:${cand.storeId ?? 'store'}:${weekKey}`
+        : `already_handled:decision:${weekKey}:${reason}`,
+      groupHeadline: reason,
+      checkKind: check,
+      reason,
+      storeName,
+    };
+  }
+
   return {
     weekKey,
     groupSummaryKey: `${check}:${cand.id}:${weekKey}`,
@@ -185,27 +202,30 @@ function buildGroupedLetGo(items: NoticedAndLetGoItem[]): GroupedLetGoItem[] {
   const out: GroupedLetGoItem[] = [];
   for (const [key, groupItems] of groups.entries()) {
     const storeItems = groupItems.filter((i) => i.storeId !== undefined);
+    const uniqueStoreCount = new Set(storeItems.map((i) => i.storeId!)).size;
     const mostRecentDate = groupItems.reduce(
       (maxD, it) => (it.date > maxD ? it.date : maxD),
       groupItems[0].date,
     );
 
     let headline = groupItems[0].reason;
-    if (storeItems.length > 1) {
+    if (uniqueStoreCount > 1) {
       const checkKind = groupItems[0].checkKind;
       if (checkKind === 'calendar' && key.includes(':drop:')) {
-        headline = `Summer lull: sales fell at ${storeItems.length} stores, as they did last year`;
+        headline = `Summer lull: sales fell at ${uniqueStoreCount} stores, as they did last year`;
       } else if (checkKind === 'calendar' && key.includes(':lull_ended:')) {
-        headline = `Summer lull ended: sales jumped at ${storeItems.length} stores returning to baseline`;
+        headline = `Summer lull ended: sales jumped at ${uniqueStoreCount} stores returning to baseline`;
       } else if (checkKind === 'calendar') {
-        headline = `Trading calendar: sales shifted at ${storeItems.length} stores`;
+        headline = `Trading calendar: sales shifted at ${uniqueStoreCount} stores`;
       } else if (checkKind === 'stock_returned') {
         const match = groupItems[0].reason.match(/delivery of ([A-Za-z]+ \d+)/);
         const delDate = match ? match[1].trim() : '';
-        headline = `Stock returned${delDate ? ` after ${delDate} delivery` : ''}: sales jumped at ${storeItems.length} stores`;
+        headline = `Stock returned${delDate ? ` after ${delDate} delivery` : ''}: sales jumped at ${uniqueStoreCount} stores`;
       } else {
-        headline = `${groupItems[0].groupHeadline} (${storeItems.length} stores)`;
+        headline = `${groupItems[0].groupHeadline} (${uniqueStoreCount} stores)`;
       }
+    } else if (groupItems.length > 1) {
+      headline = groupItems[0].groupHeadline;
     }
 
     const confs = groupItems
@@ -463,10 +483,131 @@ function buildRaisedItemSnapshot(
   };
 }
 
+interface TimelineLoopSnapshot {
+  dayIndex: number;
+  openSituations: Map<string, InternalSituation>;
+  deferredSituations: Map<string, DeferredSituationState>;
+  dismissedSituations: Set<string>;
+  approvedSituations: Set<string>;
+  handledRolloutIds: Set<string>;
+  openStockByGroup: Map<'best_sellers' | 'knitwear', Map<StoreId, string>>;
+  activeEpisodeSituation: Map<string, string>;
+  letGoMap: Map<string, NoticedAndLetGoItem>;
+  watchedMap: Map<string, WatchedState>;
+  allTrace: TraceEntry[];
+  watcherEvalLog: WatcherEvalRecord[];
+  completedInvestigations: Map<string, InvestigationResult>;
+  lastTodayCandidates: Candidate[];
+  emittedFollowUpIds: Set<string>;
+  lookedUpInvKeys: Set<string>;
+  hadPendingTarget: boolean;
+}
+
+function cloneSituation(sit: InternalSituation): InternalSituation {
+  const stores = new Map<StoreId, RaisedStoreSnapshot>();
+  for (const [k, st] of sit.stores.entries()) {
+    stores.set(k, {
+      ...st,
+      initialExpected: cloneFact(st.initialExpected),
+      initialActual: cloneFact(st.initialActual),
+      initialStakePerWeek: cloneFact(st.initialStakePerWeek),
+      todayExpected: st.todayExpected ? cloneFact(st.todayExpected) : undefined,
+      todayActual: st.todayActual ? cloneFact(st.todayActual) : undefined,
+      todayStakePerWeek: st.todayStakePerWeek ? cloneFact(st.todayStakePerWeek) : undefined,
+    });
+  }
+  const evidence = new Map<string, SupportingEvidence>();
+  for (const [k, ev] of sit.evidence.entries()) {
+    evidence.set(k, {
+      ...ev,
+      expected: cloneFact(ev.expected),
+      actual: cloneFact(ev.actual),
+      stakePerWeek: cloneFact(ev.stakePerWeek),
+      todayExpected: ev.todayExpected ? cloneFact(ev.todayExpected) : undefined,
+      todayActual: ev.todayActual ? cloneFact(ev.todayActual) : undefined,
+      todayStakePerWeek: ev.todayStakePerWeek ? cloneFact(ev.todayStakePerWeek) : undefined,
+    });
+  }
+  return {
+    ...sit,
+    initialExpected: cloneFact(sit.initialExpected),
+    initialActual: cloneFact(sit.initialActual),
+    initialStakePerWeek: cloneFact(sit.initialStakePerWeek),
+    todayExpected: cloneFact(sit.todayExpected),
+    todayActual: cloneFact(sit.todayActual),
+    todayStakePerWeek: cloneFact(sit.todayStakePerWeek),
+    stores,
+    evidence,
+    instinctMeta: sit.instinctMeta ? { ...sit.instinctMeta } : undefined,
+  };
+}
+
+function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
+  const openSituations = new Map<string, InternalSituation>();
+  for (const [k, v] of snap.openSituations.entries()) {
+    openSituations.set(k, cloneSituation(v));
+  }
+  const deferredSituations = new Map<string, DeferredSituationState>();
+  for (const [k, v] of snap.deferredSituations.entries()) {
+    deferredSituations.set(k, { ...v });
+  }
+  const openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
+  for (const [k, m] of snap.openStockByGroup.entries()) {
+    openStockByGroup.set(k, new Map(m));
+  }
+  const letGoMap = new Map<string, NoticedAndLetGoItem>();
+  for (const [k, v] of snap.letGoMap.entries()) {
+    letGoMap.set(k, { ...v, expected: cloneFact(v.expected), actual: cloneFact(v.actual) });
+  }
+  const watchedMap = new Map<string, WatchedState>();
+  for (const [k, v] of snap.watchedMap.entries()) {
+    watchedMap.set(k, { ...v });
+  }
+  return {
+    dayIndex: snap.dayIndex,
+    openSituations,
+    deferredSituations,
+    dismissedSituations: new Set(snap.dismissedSituations),
+    approvedSituations: new Set(snap.approvedSituations),
+    handledRolloutIds: new Set(snap.handledRolloutIds),
+    openStockByGroup,
+    activeEpisodeSituation: new Map(snap.activeEpisodeSituation),
+    letGoMap,
+    watchedMap,
+    allTrace: snap.allTrace.slice(),
+    watcherEvalLog: snap.watcherEvalLog.slice(),
+    completedInvestigations: new Map(snap.completedInvestigations),
+    lastTodayCandidates: snap.lastTodayCandidates.slice(),
+    emittedFollowUpIds: new Set(snap.emittedFollowUpIds),
+    lookedUpInvKeys: new Set(snap.lookedUpInvKeys),
+    hadPendingTarget: snap.hadPendingTarget,
+  };
+}
+
+const simRunCache = new Map<string, SimulationRun>();
+const timelineSnapshotCache = new Map<string, Map<number, TimelineLoopSnapshot>>();
+
+export function clearTimelineSnapshotCache(): void {
+  simRunCache.clear();
+  timelineSnapshotCache.clear();
+}
+
+function hashStateKey(val: unknown): string {
+  return createHash('sha256').update(JSON.stringify(val)).digest('hex').slice(0, 20);
+}
+
+function formatReadableCandidateName(candidateId: string): string {
+  if (candidateId.includes('stock_running_out:best_sellers')) return 'Best-sellers transfer';
+  if (candidateId.includes('stock_running_out:knitwear')) return 'Knitwear transfer';
+  if (candidateId.includes('refunds_out_of_line')) return 'Walnut Creek refunds';
+  if (candidateId.startsWith('rollout:')) return 'Held-out store rollout';
+  return candidateId.replace(/[_:]+/g, ' ');
+}
+
 /**
  * Evaluates the live timeline deterministically up to `targetDayIndex`,
- * running Gemini Decision on days with new or materially changed candidates,
- * and running/replaying investigations for raised situations.
+ * incrementally reusing cached daily loop snapshots in server memory when inputs match,
+ * and rebuilding cleanly from Day 0 whenever the cache is empty.
  */
 export async function evaluateStage2UpToDay(params: {
   seed?: number;
@@ -478,6 +619,12 @@ export async function evaluateStage2UpToDay(params: {
   investigateTargetDay?: boolean;
   /** Pre-completed investigations keyed by situationId (e.g. from SSE stream) */
   providedInvestigations?: Map<string, InvestigationResult>;
+  /** Installed Stage 4 tools */
+  builtTools?: BuiltToolRecord[];
+  /** Stage 4 reviewed refund record IDs */
+  reviewedRefundIds?: string[];
+  /** Stage 4 extra Developer trace entries */
+  builderTraceEntries?: TraceEntry[];
 }): Promise<Stage2StepResponse> {
   const seed = params.seed ?? DEFAULT_SEED;
   let decisions = (params.decisions ?? []).map((d) => ({ ...d }));
@@ -485,7 +632,29 @@ export async function evaluateStage2UpToDay(params: {
     a.date === b.date ? 0 : a.date < b.date ? -1 : 1,
   );
   const baseControlStores = params.controlStores ?? new Set<string>();
-  let sim = runSimulation(seed, decisions, LIVE_END_DATE);
+  const builtTools = params.builtTools ?? [];
+  const reviewedRefundIds = params.reviewedRefundIds ?? [];
+  const builderTraceEntries = params.builderTraceEntries ?? [];
+  const providedInvMap = params.providedInvestigations ?? new Map<string, InvestigationResult>();
+
+  const simDecisions = decisions.filter((d) => d.kind !== 'store_manager_task');
+  const decisionsKey = hashStateKey({
+    seed,
+    decisions: simDecisions.map((d) => ({
+      id: d.id,
+      date: d.date,
+      kind: d.kind,
+      undoneOnDate: d.undoneOnDate ?? null,
+      transferLines: d.transferLines ?? null,
+    })),
+  });
+  let sim = simRunCache.get(decisionsKey);
+  if (!sim) {
+    sim = runSimulation(seed, decisions, LIVE_END_DATE);
+    if (simRunCache.size > 24) simRunCache.clear();
+    simRunCache.set(decisionsKey, sim);
+  }
+
   const clampedTarget = Math.max(0, Math.min(sim.liveDates.length - 1, params.targetDayIndex));
   const targetDateForUndoCheck = sim.liveDates[clampedTarget];
 
@@ -500,29 +669,110 @@ export async function evaluateStage2UpToDay(params: {
       const undoD = preFollowUp.undoneDecisionDates.get(d.id);
       return undoD ? { ...d, undoneOnDate: undoD } : d;
     });
-    sim = runSimulation(seed, decisions, LIVE_END_DATE);
+    const simUndoDecisions = decisions.filter((d) => d.kind !== 'store_manager_task');
+    const undoKey = hashStateKey({
+      seed,
+      decisions: simUndoDecisions.map((d) => ({
+        id: d.id,
+        date: d.date,
+        kind: d.kind,
+        undoneOnDate: d.undoneOnDate ?? null,
+        transferLines: d.transferLines ?? null,
+      })),
+    });
+    let undoSim = simRunCache.get(undoKey);
+    if (!undoSim) {
+      undoSim = runSimulation(seed, decisions, LIVE_END_DATE);
+      simRunCache.set(undoKey, undoSim);
+    }
+    sim = undoSim;
   }
 
-  const openSituations = new Map<string, InternalSituation>();
-  const deferredSituations = new Map<string, DeferredSituationState>();
-  const dismissedSituations = new Set<string>();
-  const approvedSituations = new Set<string>();
-  const handledRolloutIds = new Set<string>();
-  const openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
-  const activeEpisodeSituation = new Map<string, string>();
-  const letGoMap = new Map<string, NoticedAndLetGoItem>();
-  const watchedMap = new Map<string, WatchedState>();
-  const allTrace: TraceEntry[] = [];
-  const watcherEvalLog: WatcherEvalRecord[] = [];
-  const completedInvestigations = new Map<string, InvestigationResult>(
-    params.providedInvestigations ?? [],
-  );
+  const contextDecisions = decisions.filter((d) => d.kind !== 'store_manager_task');
+  const contextKey = hashStateKey({
+    seed,
+    decisions: contextDecisions.map((d) => ({ id: d.id, date: d.date, kind: d.kind, undoneOnDate: d.undoneOnDate ?? null })),
+    reactions: reactions.map((r) => ({ id: r.id, candidateId: r.candidateId, date: r.date, reaction: r.reaction })),
+    controlStores: Array.from(baseControlStores).sort(),
+    builtTools: builtTools.map((t) => ({ id: t.id, installedOn: t.installedOn, mode: t.mode })),
+    reviewedRefundIds: [...reviewedRefundIds].sort(),
+  });
+
+  let cacheBucket = timelineSnapshotCache.get(contextKey);
+  if (!cacheBucket) {
+    if (timelineSnapshotCache.size > 16) {
+      const firstKey = timelineSnapshotCache.keys().next().value;
+      if (firstKey) timelineSnapshotCache.delete(firstKey);
+    }
+    cacheBucket = new Map<number, TimelineLoopSnapshot>();
+    timelineSnapshotCache.set(contextKey, cacheBucket);
+  }
+
+  // Locate highest reusable snapshot k <= clampedTarget where every lookedUpInvKey still matches providedInvMap
+  let resumeFromDay = -1;
+  let openSituations = new Map<string, InternalSituation>();
+  let deferredSituations = new Map<string, DeferredSituationState>();
+  let dismissedSituations = new Set<string>();
+  let approvedSituations = new Set<string>();
+  let handledRolloutIds = new Set<string>();
+  let openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
+  let activeEpisodeSituation = new Map<string, string>();
+  let letGoMap = new Map<string, NoticedAndLetGoItem>();
+  let watchedMap = new Map<string, WatchedState>();
+  let allTrace: TraceEntry[] = [];
+  let watcherEvalLog: WatcherEvalRecord[] = [];
+  let completedInvestigations = new Map<string, InvestigationResult>(providedInvMap);
+  let lastTodayCandidates: Candidate[] = [];
+  let emittedFollowUpIds = new Set<string>();
+  const lookedUpInvKeys = new Set<string>();
+
+  for (let probe = clampedTarget; probe >= 0; probe--) {
+    const snap = cacheBucket.get(probe);
+    if (!snap) continue;
+    // If probing the target day itself and it previously stopped on a pending situation, step from probe - 1
+    // so either pendingSituation is returned for SSE streaming or investigateTargetDay=true runs it
+    if (probe === clampedTarget && snap.hadPendingTarget) {
+      continue;
+    }
+    // Check that none of the investigations looked up on days <= probe changed since this snapshot was saved
+    let mismatch = false;
+    for (const invKey of snap.lookedUpInvKeys) {
+      const snapInv = snap.completedInvestigations.get(invKey);
+      const curInv = providedInvMap.get(invKey);
+      if (curInv && (!snapInv || snapInv.latencyMs !== curInv.latencyMs || snapInv.model !== curInv.model || snapInv.status !== curInv.status)) {
+        mismatch = true;
+        break;
+      }
+    }
+    if (mismatch) continue;
+
+    const cloned = cloneSnapshot(snap);
+    openSituations = cloned.openSituations;
+    deferredSituations = cloned.deferredSituations;
+    dismissedSituations = cloned.dismissedSituations;
+    approvedSituations = cloned.approvedSituations;
+    handledRolloutIds = cloned.handledRolloutIds;
+    openStockByGroup = cloned.openStockByGroup;
+    activeEpisodeSituation = cloned.activeEpisodeSituation;
+    letGoMap = cloned.letGoMap;
+    watchedMap = cloned.watchedMap;
+    allTrace = cloned.allTrace;
+    watcherEvalLog = cloned.watcherEvalLog;
+    // Merge provided investigations (e.g. newly completed on later day) with cached ones
+    completedInvestigations = new Map(cloned.completedInvestigations);
+    for (const [ik, iv] of providedInvMap.entries()) {
+      completedInvestigations.set(ik, iv);
+    }
+    lastTodayCandidates = cloned.lastTodayCandidates;
+    emittedFollowUpIds = cloned.emittedFollowUpIds;
+    for (const ik of cloned.lookedUpInvKeys) lookedUpInvKeys.add(ik);
+    resumeFromDay = probe;
+    break;
+  }
 
   let pendingSituation: RaisedItem | undefined;
-  let lastTodayCandidates: Candidate[] = [];
-  const emittedFollowUpIds = new Set<string>();
 
-  for (let i = 0; i <= clampedTarget; i++) {
+  for (let i = resumeFromDay + 1; i <= clampedTarget; i++) {
     const date = sim.liveDates[i];
 
     // Process any reactions on this day
@@ -531,6 +781,8 @@ export async function evaluateStage2UpToDay(params: {
       if (r.candidateId.startsWith('rollout:') && (r.reaction === 'approve' || r.reaction === 'dismiss')) {
         handledRolloutIds.add(r.candidateId);
       }
+      const readableName =
+        openSituations.get(r.candidateId)?.title ?? formatReadableCandidateName(r.candidateId);
       if (r.reaction === 'approve') {
         approvedSituations.add(r.candidateId);
         deferredSituations.delete(r.candidateId);
@@ -540,7 +792,7 @@ export async function evaluateStage2UpToDay(params: {
           date,
           lane: 'manager',
           kind: 'note',
-          headline: `Owner approved: ${r.candidateId}`,
+          headline: `Owner approved: ${readableName}`,
           detail: r.detail ?? `Approved by owner on ${formatShortDate(date)}.`,
           outcome: 'raised',
         });
@@ -554,7 +806,7 @@ export async function evaluateStage2UpToDay(params: {
           lane: 'manager',
           kind: 'note',
           headline: `Owner dismissed (${(r.reason ?? 'other').replace(/_/g, ' ')})`,
-          detail: `${r.candidateId} dismissed by owner on ${formatShortDate(date)}.`,
+          detail: `${readableName} dismissed by owner on ${formatShortDate(date)}.`,
           outcome: 'let_go',
         });
       } else if (r.reaction === 'not_now') {
@@ -570,7 +822,7 @@ export async function evaluateStage2UpToDay(params: {
           date,
           lane: 'manager',
           kind: 'note',
-          headline: `Owner deferred (Not now): ${sit?.title ?? r.candidateId}`,
+          headline: `Owner deferred (Not now): ${readableName}`,
           detail: `Card hidden on ${formatShortDate(date)}; continuing to check daily and will re-raise if it worsens.`,
           outcome: 'info',
         });
@@ -859,6 +1111,8 @@ export async function evaluateStage2UpToDay(params: {
         letGoSummaries,
         decisions,
         controlStores: effectiveControlStores,
+        builtTools,
+        reviewedRefundIds,
       });
 
       if (batch.errorNotice) {
@@ -1128,6 +1382,7 @@ export async function evaluateStage2UpToDay(params: {
         openSituations.set(newSit.id, newSit);
 
         // Check if an investigation already exists or needs to run
+        lookedUpInvKeys.add(newSit.id);
         const existingInv = completedInvestigations.get(newSit.id);
         if (existingInv) {
           newSit.investigation = existingInv;
@@ -1349,6 +1604,31 @@ export async function evaluateStage2UpToDay(params: {
         }
       }
     }
+
+    // Cache end-of-day snapshot so advancing to day i+1 reuses days 0..i cleanly
+    const isPendingOnThisDay = Boolean(pendingSituation && i === clampedTarget);
+    cacheBucket.set(
+      i,
+      cloneSnapshot({
+        dayIndex: i,
+        openSituations,
+        deferredSituations,
+        dismissedSituations,
+        approvedSituations,
+        handledRolloutIds,
+        openStockByGroup,
+        activeEpisodeSituation,
+        letGoMap,
+        watchedMap,
+        allTrace,
+        watcherEvalLog,
+        completedInvestigations,
+        lastTodayCandidates,
+        emittedFollowUpIds,
+        lookedUpInvKeys,
+        hadPendingTarget: isPendingOnThisDay,
+      }),
+    );
   }
 
   const targetDate = sim.liveDates[clampedTarget];
@@ -1359,12 +1639,19 @@ export async function evaluateStage2UpToDay(params: {
     handledRolloutIds,
   });
 
-  // Include Gateway trace entries on or before targetDate
+  // Include Gateway trace entries and builder trace entries on or before targetDate
   const gatewayLogs = getGatewayAttemptLog().filter((g) => g.date <= targetDate);
   const existingTraceIds = new Set(allTrace.map((t) => t.id));
   for (const g of gatewayLogs) {
     if (!existingTraceIds.has(g.id)) {
       allTrace.push(g);
+      existingTraceIds.add(g.id);
+    }
+  }
+  for (const bt of builderTraceEntries) {
+    if (bt.date <= targetDate && !existingTraceIds.has(bt.id)) {
+      allTrace.push(bt);
+      existingTraceIds.add(bt.id);
     }
   }
 
@@ -1442,6 +1729,26 @@ export async function evaluateStage2UpToDay(params: {
     }))
     .reverse();
 
+  const refundWindowStart = addDays(targetDate, -34);
+  const refundRows = sim.walnutCreekRefunds.filter(
+    (r) => r.date >= refundWindowStart && r.date <= targetDate,
+  );
+  const refundSwitchEnabled = decisions.some(
+    (d) => d.kind === 'refund_switch' && !d.undoneOnDate && d.date <= targetDate,
+  );
+  const visibleBuiltTools = builtTools.filter((t) => t.installedOn <= targetDate);
+  let toolUnreviewedFact: Fact | undefined;
+  if (visibleBuiltTools.length > 0) {
+    const stats = computeExpectedFlaggedStats(refundRows, new Set(reviewedRefundIds));
+    toolUnreviewedFact = createFact(
+      `tool:unreviewed:${targetDate}`,
+      'Walnut Creek unreviewed flagged refunds (35d)',
+      stats.unreviewedFlaggedCount,
+      'count',
+      `${stats.unreviewedFlaggedCount} unreviewed flagged late-evening Till 2 operator 14 cash refunds out of ${stats.count} flagged ($${stats.total.toFixed(2)}) over the last 35 days through ${targetDate}.`,
+    );
+  }
+
   return {
     dayState: {
       date: targetDate,
@@ -1459,6 +1766,11 @@ export async function evaluateStage2UpToDay(params: {
       watcherEvalLog,
       pendingInvestigationId: pendingSituation?.candidateId,
       reactions: reactions.filter((r) => r.date <= targetDate),
+      builtTools: visibleBuiltTools,
+      refundSwitchEnabled,
+      reviewedRefundIds,
+      refundRows,
+      toolUnreviewedFact,
     },
     sim,
     pendingSituation,

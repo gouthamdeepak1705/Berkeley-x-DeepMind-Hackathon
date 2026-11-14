@@ -200,9 +200,15 @@ function buildCodeFallbackInvestigation(
     ensureTool('get_stock_cover_by_store_and_group', { group_id: grp }, nextRound++);
     ensureTool('get_lost_sales', { group_id: grp }, nextRound++);
   } else if (situation.detectorKind === 'refunds_out_of_line') {
+    const targetStoreId = situation.stores?.[0]?.storeId ?? 'walnut_creek';
     ensureTool(
       'compare_store_with_established',
-      { store_id: situation.stores?.[0]?.storeId ?? 'walnut_creek', metric: 'refund_rate', window_days: 28 },
+      { store_id: targetStoreId, metric: 'refund_rate', window_days: 28 },
+      nextRound++,
+    );
+    ensureTool(
+      'get_refund_breakdown',
+      { store_id: targetStoreId, window_days: 28 },
       nextRound++,
     );
   }
@@ -299,48 +305,61 @@ function buildCodeFallbackInvestigation(
     outcomeDetail = 'Recommend inter-store stock transfer respecting the donor 8-week and approval rules.';
   } else if (isRefunds) {
     const excessFact =
-      Object.values(factsById).find((f) => f.id.includes('excess_refunds_wk')) ??
+      Object.values(factsById).find((f) => f.id.includes('refund_bd:weekly_excess') || f.id.includes('excess_refunds_wk')) ??
       situation.stakePerWeek;
-    const after8Fact = Object.values(factsById).find((f) => f.id.includes('after8_unlinked_cash'));
+    const op14UsdFact =
+      Object.values(factsById).find((f) => f.id.includes('refund_bd:op14_usd')) ??
+      excessFact;
+    const op14CountFact = Object.values(factsById).find((f) => f.id.includes('refund_bd:op14_count'));
     const storeName = situation.stores?.[0]?.storeName ?? 'Walnut Creek';
     const saveFact = createFact(
-      `fallback:refund_audit:${date}`,
-      'Targeted till refund review weekly recovery',
+      `fallback:refund_desk:${date}`,
+      'Refund exceptions desk & approval switch recovery',
       excessFact.value,
       'USD',
-      'Weekly excess refund exposure addressed by reviewing unlinked late-evening cash refunds.',
+      'Weekly excess refund exposure addressed by reviewing flagged till receipts and requiring approval above $50.',
     );
     factsById[saveFact.id] = saveFact;
 
     findingSegments = [
       { type: 'text', text: `${storeName} refund rate climbed to ` },
       { type: 'fact', fact: situation.actual },
-      { type: 'text', text: ' against the other-store benchmark of ' },
+      { type: 'text', text: ' versus the other-store rate of ' },
       { type: 'fact', fact: situation.expected },
       { type: 'text', text: '.' },
     ];
-    causeSegments = after8Fact
+    causeSegments = op14CountFact
       ? [
-          { type: 'text', text: 'Unlinked cash refunds after evening hours make up ' },
-          { type: 'fact', fact: after8Fact },
-          { type: 'text', text: ' of total store refunds, concentrated on Till 2, operator 14.' },
+          { type: 'fact', fact: op14CountFact },
+          { type: 'text', text: ' unlinked cash refunds after eight pm on Till two, operator fourteen, total ' },
+          { type: 'fact', fact: op14UsdFact },
+          { type: 'text', text: '.' },
         ]
       : [
-          { type: 'text', text: 'Unlinked cash refunds at one till drove ' },
+          { type: 'text', text: 'Unlinked cash refunds after eight pm on Till two, operator fourteen, drove ' },
           { type: 'fact', fact: excessFact },
-          { type: 'text', text: ' in weekly excess refunds.' },
+          { type: 'text', text: ' weekly excess.' },
         ];
     proposalSegments = [
-      { type: 'text', text: 'Escalate a private till audit for operator review, protecting ' },
+      { type: 'text', text: 'Build a refund exceptions desk and require manager approval for large cash refunds, protecting ' },
       { type: 'fact', fact: saveFact },
-      { type: 'text', text: ' per week.' },
+      { type: 'text', text: '/wk.' },
     ];
     options = [
       {
-        id: 'audit_refunds',
-        label: 'Hand to manager for private till audit',
+        id: 'build_refund_desk',
+        label: 'Build a refund exceptions desk',
         isDoNothing: false,
-        description: 'Review unlinked cash refund receipts on Till 2, operator 14 privately with the store lead.',
+        description:
+          'Write a focused desk for the finance lead showing 35 days of Walnut Creek refunds, flagged Till 2 evening cash entries, and an approval switch.',
+        weeklyEffectFact: saveFact,
+      },
+      {
+        id: 'ask_store_manager',
+        label: 'Ask the store manager',
+        isDoNothing: false,
+        description:
+          'Send a question to the Walnut Creek store manager asking for an explanation of the cash refunds on Till 2 after 8 pm (due in 3 days).',
         weeklyEffectFact: saveFact,
       },
       {
@@ -351,8 +370,9 @@ function buildCodeFallbackInvestigation(
         weeklyEffectFact: doNothingFact,
       },
     ];
-    outcomeKind = 'person_decision';
-    outcomeDetail = 'Decision for a person: handle private staff refund audit outside automated actions.';
+    outcomeKind = 'tool_to_build';
+    outcomeDetail =
+      'Tool to build: write a Refund exceptions desk for the finance lead, and optionally ask the store manager about Till 2 cash refunds after 8 pm.';
   } else {
     findingSegments = [
       { type: 'text', text: `${situation.title}: actual ` },
@@ -587,10 +607,11 @@ export async function runSituationInvestigation(params: {
     'Find out what is true and why for the raised situation.',
     'Mandatory discipline:',
     '1. Always test the rival explanations (call test_calendar_for_period, test_store_mix, and test_data_fault) BEFORE naming a cause.',
-    '2. Call the relevant domain tools (e.g. get_stock_cover_by_store_and_group, get_lost_sales, compare_store_with_established, compare_with_last_year, recompute_figure) to gather exact fact IDs.',
-    '3. NEVER calculate numbers yourself and NEVER type digits (0-9) in templates — always reference facts by their exact fact id using {{fact_id}}.',
-    '4. Always include a "do nothing" option among the options.',
-    '5. When investigating stock shortages, check donor stores with idle surplus and respect the 8-week + next-delivery+1-week donor floor.',
+    '2. Call the relevant domain tools (e.g. get_stock_cover_by_store_and_group, get_lost_sales, compare_store_with_established, get_refund_breakdown, compare_with_last_year, recompute_figure) to gather exact fact IDs.',
+    '3. For refund anomalies, ALWAYS call get_refund_breakdown and set outcome_kind to "tool_to_build" when unlinked late-evening cash refunds concentrate on one till and operator.',
+    '4. NEVER calculate numbers yourself and NEVER type digits (0-9) in templates — always reference facts by their exact fact id using {{fact_id}}.',
+    '5. Always include a "do nothing" option among the options.',
+    '6. When investigating stock shortages, check donor stores with idle surplus and respect the 8-week + next-delivery+1-week donor floor.',
   ].join('\n');
 
   const initialPrompt = [
@@ -852,6 +873,37 @@ export async function runSituationInvestigation(params: {
       }));
 
       const isLetGo = parsedPayload.outcome_kind === 'nothing_to_do';
+      const resolvedOutcomeKind: InvestigationOutcomeKind =
+        situation.detectorKind === 'refunds_out_of_line' && !isLetGo
+          ? 'tool_to_build'
+          : parsedPayload.outcome_kind;
+
+      let finalOptions = options;
+      if (situation.detectorKind === 'refunds_out_of_line' && !isLetGo) {
+        const weeklyEffect =
+          Object.values(localFacts).find((f) => f.id.includes('refund_bd:weekly_excess')) ??
+          situation.stakePerWeek;
+        const doNothingOpt = options.find((o) => o.isDoNothing);
+        finalOptions = [
+          {
+            id: 'build_refund_desk',
+            label: 'Build a refund exceptions desk',
+            isDoNothing: false,
+            description:
+              'Write a focused desk for the finance lead showing 35 days of Walnut Creek refunds, flagged Till 2 evening cash entries, and an approval switch.',
+            weeklyEffectFact: weeklyEffect,
+          },
+          {
+            id: 'ask_store_manager',
+            label: 'Ask the store manager',
+            isDoNothing: false,
+            description:
+              'Send a question to the Walnut Creek store manager asking for an explanation of the cash refunds on Till 2 after 8 pm (due in 3 days).',
+            weeklyEffectFact: weeklyEffect,
+          },
+          ...(doNothingOpt ? [doNothingOpt] : []),
+        ];
+      }
 
       const finalResult: InvestigationResult = {
         candidateId: situation.candidateId,
@@ -862,8 +914,8 @@ export async function runSituationInvestigation(params: {
         proposalSegments,
         causes,
         ruledOut,
-        options,
-        outcomeKind: parsedPayload.outcome_kind,
+        options: finalOptions,
+        outcomeKind: resolvedOutcomeKind,
         outcomeDetail: parsedPayload.outcome_detail,
         model,
         mode: finalMode,

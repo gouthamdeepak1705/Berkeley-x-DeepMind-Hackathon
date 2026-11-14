@@ -50,6 +50,146 @@ export function evaluateActionsUpToDate(params: {
   for (const decision of decisions) {
     if (decision.date > date) continue;
 
+    if (decision.kind === 'refund_switch') {
+      const storeId = decision.storeId ?? 'walnut_creek';
+      const storeName = STORE_MAP[storeId].name;
+      const endDate = decision.proofEndDate ?? addDays(decision.date, 21);
+
+      const computeRateForSpan = (startD: string, endD: string): { ratePct: number; sales: number; refunds: number } => {
+        const sIdx = sim.dates.indexOf(startD);
+        const eIdx = sim.dates.indexOf(endD);
+        if (sIdx < 0 || eIdx < 0 || eIdx < sIdx) return { ratePct: 0, sales: 0, refunds: 0 };
+        let sales = 0;
+        let refunds = 0;
+        for (let k = sIdx; k <= eIdx; k++) {
+          const rec = sim.storeRecordsByDate[sim.dates[k]]?.[storeId];
+          if (!rec || !rec.isOpen) continue;
+          sales += rec.actualSales;
+          refunds += rec.refundAmount;
+        }
+        return {
+          ratePct: sales > 0 ? (refunds / sales) * 100 : 0,
+          sales,
+          refunds,
+        };
+      };
+
+      const beforeStart = addDays(decision.date, -21);
+      const beforeEnd = addDays(decision.date, -1);
+      const beforeStats = computeRateForSpan(beforeStart, beforeEnd);
+      const beforeFact = createFact(
+        `proof:${decision.id}:before_rate`,
+        `${storeName} 21-day refund rate before switch`,
+        beforeStats.ratePct,
+        'percent',
+        `Refunds ($${Math.round(beforeStats.refunds).toLocaleString('en-US')}) divided by sales ($${Math.round(beforeStats.sales).toLocaleString('en-US')}) from ${beforeStart} to ${beforeEnd}.`,
+      );
+
+      const afterStart = addDays(decision.date, 1);
+      const afterEnd = date < endDate ? date : endDate;
+      const hasAfterDays = afterEnd >= afterStart;
+      const afterStats = hasAfterDays
+        ? computeRateForSpan(afterStart, afterEnd)
+        : beforeStats;
+      const afterFact = createFact(
+        `proof:${decision.id}:after_rate:${date}`,
+        `${storeName} refund rate after switch`,
+        afterStats.ratePct,
+        'percent',
+        hasAfterDays
+          ? `Refunds ($${Math.round(afterStats.refunds).toLocaleString('en-US')}) divided by sales ($${Math.round(afterStats.sales).toLocaleString('en-US')}) from ${afterStart} to ${afterEnd}.`
+          : `Switch takes effect starting ${afterStart}; showing baseline rate on ${decision.date}.`,
+      );
+
+      if (date < endDate) {
+        const elapsed = Math.max(0, diffDays(decision.date, date));
+        inProgress.push({
+          decisionId: decision.id,
+          candidateId: decision.candidateId,
+          title: decision.title ?? `${storeName} cash refund approval switch`,
+          measure: decision.measure ?? `${storeName} 21-day refund rate before vs after switch`,
+          statusText: hasAfterDays
+            ? `Day ${elapsed} / 21 · Before ${beforeFact.formatted} · After ${afterFact.formatted}`
+            : `Takes effect tomorrow · baseline ${beforeFact.formatted}`,
+          nextCheckpoint: `21-day review on ${formatShortDate(endDate)}`,
+          endDate,
+          arrivalDate: afterStart,
+          beforeRefundRateFact: beforeFact,
+          afterRefundRateFact: afterFact,
+        });
+      } else {
+        closedDecisionIds.add(decision.id);
+        const verdictSentence = 'Likely worked. One store, before and after: not proven.';
+        const detailSentence =
+          `${storeName} refunds fell from ${beforeFact.formatted} before to ${afterFact.formatted} after. Proof needs a held-out control store and there is none here — only one store had this problem.`;
+
+        doneForYou.push({
+          decisionId: decision.id,
+          candidateId: decision.candidateId,
+          title: decision.title ?? `${storeName} cash refund approval switch`,
+          verdict: 'worked_before_after',
+          verdictSentence,
+          detailSentence,
+          approvedOn: decision.date,
+          closedOn: endDate,
+          beforeRefundRateFact: beforeFact,
+          afterRefundRateFact: afterFact,
+        });
+
+        traceEntries.push({
+          id: `trace:${endDate}:followup:refund_switch:${decision.id}`,
+          date: endDate,
+          lane: 'manager',
+          kind: 'followup',
+          headline: `${verdictSentence} (${storeName} cash refund approval)`,
+          detail: detailSentence,
+          outcome: 'raised',
+          facts: [beforeFact, afterFact],
+        });
+
+        traceEntries.push({
+          id: `trace:${endDate}:ds:refund_switch:${decision.id}`,
+          date: endDate,
+          lane: 'data_scientist',
+          kind: 'followup',
+          headline: `Before/after 21-day check: ${storeName} refund rate`,
+          detail: `21-day before (${beforeFact.formatted}) vs 21-day after (${afterFact.formatted}). Cannot claim proof without a held-out control store.`,
+          outcome: 'info',
+          facts: [beforeFact, afterFact],
+        });
+      }
+      continue;
+    }
+
+    if (decision.kind === 'store_manager_task') {
+      const endDate = decision.dueDate ?? decision.proofEndDate ?? addDays(decision.date, 3);
+      if (date < endDate) {
+        inProgress.push({
+          decisionId: decision.id,
+          candidateId: decision.candidateId,
+          title: decision.title ?? 'Ask Walnut Creek store manager',
+          measure: decision.measure ?? 'Explanation for Till 2 cash refunds after 8 pm',
+          statusText: 'Sent to Walnut Creek store manager (simulated)',
+          nextCheckpoint: `Due ${formatShortDate(endDate)}`,
+          endDate,
+          arrivalDate: decision.date,
+          isSimulatedTask: true,
+        });
+      } else {
+        closedDecisionIds.add(decision.id);
+        doneForYou.push({
+          decisionId: decision.id,
+          candidateId: decision.candidateId,
+          title: decision.title ?? 'Ask Walnut Creek store manager',
+          verdict: 'unclear',
+          verdictSentence: 'Due date reached (simulated task; nothing sent outside the app).',
+          approvedOn: decision.date,
+          closedOn: endDate,
+        });
+      }
+      continue;
+    }
+
     if (decision.kind !== 'transfer' || !decision.transferLines || decision.transferLines.length === 0) {
       // Non-transfer action (e.g. refund_audit)
       const endDate = decision.proofEndDate ?? addDays(decision.date, 28);
