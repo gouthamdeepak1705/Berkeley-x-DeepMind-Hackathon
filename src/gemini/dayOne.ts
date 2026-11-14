@@ -1,6 +1,6 @@
 import { createFact } from '../engine/facts';
 import { DayOneBrief, Fact, TextSegment } from '../types/domain';
-import { callInteractionRaw, isCapReached } from './client';
+import { callInteractionRaw, isGeminiCallBlocked } from './client';
 import { validateAndResolvePlaceholders } from './placeholders';
 import { GEMINI_SETTINGS } from './settings';
 
@@ -58,7 +58,7 @@ export async function generateDayOneBriefWithGemini(baseBrief: DayOneBrief): Pro
   };
 
   const cfg = GEMINI_SETTINGS.jobs.day_one_description;
-  if (isCapReached(cfg.capBucket)) {
+  if (isGeminiCallBlocked(cfg.capBucket)) {
     return {
       ...baseBrief,
       narrativeSegments: buildCodeFallbackParagraphs(baseBrief),

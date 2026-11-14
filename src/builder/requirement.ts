@@ -5,9 +5,8 @@ import { SimulationRun } from '../engine/simulation';
 import {
   callInteractionRaw,
   formatGeminiError,
-  getApiKey,
   getUnavailableModelReason,
-  isCapReached,
+  isGeminiCallBlocked,
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
@@ -199,7 +198,8 @@ export async function generateRefundDeskRequirement(params: {
   factsById[situation.expected.id] = situation.expected;
   factsById[situation.stakePerWeek.id] = situation.stakePerWeek;
 
-  if (!getApiKey() || isCapReached(cfg.capBucket)) {
+  const blockReason = isGeminiCallBlocked(cfg.capBucket);
+  if (blockReason) {
     recordGeminiCall({
       feature: `builder:req:${situation.candidateId}`,
       job: cfg.key,
@@ -208,7 +208,7 @@ export async function generateRefundDeskRequirement(params: {
       inputTokens: 0,
       outputTokens: 0,
       mode: 'fallback',
-      error: !getApiKey() ? 'No GEMINI_API_KEY configured' : 'Daily cap reached',
+      error: blockReason,
     });
     return buildFallbackRequirement({
       situationId: situation.candidateId,

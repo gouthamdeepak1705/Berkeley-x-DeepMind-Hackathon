@@ -150,7 +150,7 @@ export function buildWatcherBriefing(params: {
           .join('; ')
       : 'none';
   const activeDecisionsAsOfDate = decisions.filter(
-    (d) => d.date <= date && d.kind !== 'store_manager_task',
+    (d) => d.date < date && d.kind !== 'store_manager_task',
   );
   const decisionText =
     activeDecisionsAsOfDate.length > 0

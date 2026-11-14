@@ -1,5 +1,5 @@
 import { RefundRecord, ToolTestCaseResult } from '../types/domain';
-import { computeExpectedFlaggedStats, injectSandboxCsp } from './builder';
+import { computeExpectedFlaggedStats, injectSandboxCsp } from './sandboxUtils';
 
 export interface SandboxTestSuiteResult {
   allPassed: boolean;

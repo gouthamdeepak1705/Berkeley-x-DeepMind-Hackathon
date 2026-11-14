@@ -8,6 +8,12 @@ import {
   evaluateStage2UpToDay,
 } from '../engine/stage2Timeline';
 import { executeActionThroughGateway } from '../gateway/gateway';
+import {
+  clearGeminiMemoryCache,
+  getGeminiPlaybackMode,
+  loadRecordedRunFromDisk,
+  setGeminiPlaybackMode,
+} from '../gemini/client';
 import { GEMINI_SETTINGS } from '../gemini/settings';
 import { buildWatcherBriefing } from '../watcher/briefing';
 import {
@@ -268,7 +274,10 @@ test('Stage 4: Oct 3 Walnut Creek refunds shows tool_to_build with Build & Ask s
 
 test('Stage 4: Refund exceptions desk math, sandbox test outcome evaluator, fallback builder, switch simulation & 21-day before/after proof', async () => {
   const prevKey = process.env.GEMINI_API_KEY;
+  const prevMode = getGeminiPlaybackMode();
   process.env.GEMINI_API_KEY = '';
+  clearGeminiMemoryCache();
+  setGeminiPlaybackMode('live');
   try {
     clearTimelineSnapshotCache();
     const baseSim = runSimulation(DEFAULT_SEED);
@@ -449,5 +458,8 @@ test('Stage 4: Refund exceptions desk math, sandbox test outcome evaluator, fall
     clearTimelineSnapshotCache();
     if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
     else delete process.env.GEMINI_API_KEY;
+    clearGeminiMemoryCache();
+    loadRecordedRunFromDisk();
+    setGeminiPlaybackMode(prevMode);
   }
 });

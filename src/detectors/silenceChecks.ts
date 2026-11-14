@@ -138,9 +138,15 @@ export function evaluateSilenceChecks(
       reason = `${STORE_MAP[candidate.storeId].name} is deliberately held out as a control store.`;
     } else {
       const matchingDecision = decisions.find((d) => {
-        if (d.date > date || d.undoneOnDate) return false;
+        if (d.date >= date || d.undoneOnDate) return false;
         if (d.kind === 'store_manager_task') return false;
         if (d.candidateId === candidate.id) return true;
+        if (candidate.kind === 'refunds_out_of_line') {
+          return (
+            (d.kind === 'refund_switch' || d.kind === 'refund_audit') &&
+            d.storeId === candidate.storeId
+          );
+        }
         if (candidate.groupId && d.candidateId === `situation:stock_running_out:${candidate.groupId}`) {
           if (
             candidate.storeId &&

@@ -4,10 +4,9 @@ import { STORE_MAP } from '../engine/stores';
 import {
   callInteractionRaw,
   formatGeminiError,
-  getApiKey,
   getUnavailableModelReason,
   InteractionStep,
-  isCapReached,
+  isGeminiCallBlocked,
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
@@ -121,7 +120,29 @@ const INVESTIGATION_RESPONSE_SCHEMA: Record<string, unknown> = {
   ],
 };
 
-function selectInvestigationJob(situation: RaisedItem): GeminiJobKey {
+function selectInvestigationJob(
+  situation: RaisedItem,
+  sim: SimulationRun,
+  date: string,
+  controlStores?: Set<string>,
+): 'investigate_large' | 'investigate_routine' {
+  if (situation.detectorKind === 'stock_running_out' && (!situation.stores || situation.stores.length <= 1)) {
+    const grpId = situation.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
+    const { plan } = buildTransferPlanForGroup({
+      sim,
+      date,
+      groupId: grpId,
+      controlStores,
+    });
+    if (
+      plan.receiverStoreIds.length <= 1 &&
+      !plan.holdoutStoreId &&
+      plan.totalUnitsFact.value > 0 &&
+      plan.totalUnitsFact.value < 500
+    ) {
+      return 'investigate_routine';
+    }
+  }
   if (
     situation.stakePerWeek.value >= GEMINI_SETTINGS.watcherThresholds.largeSituationStakeThresholdUsd ||
     situation.detectorKind === 'lfl_break' ||
@@ -527,7 +548,7 @@ export async function runSituationInvestigation(params: {
   onEvent?: (ev: InvestigationStreamEvent) => void;
 }): Promise<InvestigationResult> {
   const { situation, sim, date, controlStores = new Set(), bypassCache = false, onEvent } = params;
-  const jobKey = selectInvestigationJob(situation);
+  const jobKey = selectInvestigationJob(situation, sim, date, controlStores);
   const cfg = GEMINI_SETTINGS.jobs[jobKey];
   const factsById = seedFactsFromSituation(situation);
   const startAll = Date.now();
@@ -566,7 +587,8 @@ export async function runSituationInvestigation(params: {
     });
   };
 
-  if (!getApiKey() || isCapReached(cfg.capBucket)) {
+  const blockReason = isGeminiCallBlocked(cfg.capBucket);
+  if (blockReason) {
     recordGeminiCall({
       feature: `checker:${situation.candidateId}`,
       job: jobKey,
@@ -575,7 +597,7 @@ export async function runSituationInvestigation(params: {
       inputTokens: 0,
       outputTokens: 0,
       mode: 'fallback',
-      error: !getApiKey() ? 'No GEMINI_API_KEY configured' : 'Daily cap reached',
+      error: blockReason,
     });
     const secondCheck = await runSecondCheckStep();
     const fallback = buildCodeFallbackInvestigation(
@@ -591,6 +613,7 @@ export async function runSituationInvestigation(params: {
     );
     fallback.secondCheck = secondCheck;
     fallback.transferPlan = transferPlanResult?.plan;
+    fallback.jobKey = jobKey;
     onEvent?.({ type: 'done', message: 'Fallback investigation ready.', result: fallback });
     return fallback;
   }
@@ -925,6 +948,7 @@ export async function runSituationInvestigation(params: {
         factsById: localFacts,
         secondCheck,
         transferPlan: transferPlanResult?.plan,
+        jobKey,
       };
 
       onEvent?.({ type: 'done', message: 'Investigation complete.', result: finalResult });
@@ -953,6 +977,7 @@ export async function runSituationInvestigation(params: {
       );
       fallback.secondCheck = secondCheck;
       fallback.transferPlan = transferPlanResult?.plan;
+      fallback.jobKey = jobKey;
       onEvent?.({ type: 'done', message: 'Investigation completed on code fallback.', result: fallback });
       return fallback;
     }
@@ -972,6 +997,7 @@ export async function runSituationInvestigation(params: {
   );
   fallback.secondCheck = secondCheck;
   fallback.transferPlan = transferPlanResult?.plan;
+  fallback.jobKey = jobKey;
   onEvent?.({ type: 'done', message: 'Investigation completed on code fallback.', result: fallback });
   return fallback;
 }

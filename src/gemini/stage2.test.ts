@@ -7,6 +7,12 @@ import { validateAndResolvePlaceholders } from './placeholders';
 import { executeCheckerTool } from '../checker/tools';
 import { generateDayOneBriefWithGemini } from './dayOne';
 import { evaluateStage2UpToDay } from '../engine/stage2Timeline';
+import {
+  clearGeminiMemoryCache,
+  getGeminiPlaybackMode,
+  loadRecordedRunFromDisk,
+  setGeminiPlaybackMode,
+} from './client';
 
 function extractDatesFromString(s: string): string[] {
   return s.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
@@ -92,7 +98,10 @@ test('all 8 Checker tools compute facts strictly <= date and surface donor stock
 
 test('Check 7: with GEMINI_API_KEY removed, run completes on Stage 1 code behaviour with fallbacks marked', async () => {
   const prevKey = process.env.GEMINI_API_KEY;
+  const prevMode = getGeminiPlaybackMode();
   process.env.GEMINI_API_KEY = '';
+  clearGeminiMemoryCache();
+  setGeminiPlaybackMode('live');
 
   try {
     const sim = runSimulation(DEFAULT_SEED);
@@ -136,5 +145,8 @@ test('Check 7: with GEMINI_API_KEY removed, run completes on Stage 1 code behavi
     } else {
       delete process.env.GEMINI_API_KEY;
     }
+    clearGeminiMemoryCache();
+    loadRecordedRunFromDisk();
+    setGeminiPlaybackMode(prevMode);
   }
 });

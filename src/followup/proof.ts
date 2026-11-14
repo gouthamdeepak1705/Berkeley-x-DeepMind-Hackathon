@@ -221,11 +221,241 @@ export function evaluateActionsUpToDate(params: {
 
     const groupId = decision.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
     const grpLabel = groupId === 'best_sellers' ? 'Best-sellers' : 'Knitwear';
+    const grpShare = groupId === 'best_sellers' ? 0.35 : 0.15;
     const arrivalDate = decision.arrivalDate ?? addDays(decision.date, 2);
     const endDate = decision.proofEndDate ?? addDays(arrivalDate, 28);
     const treatedStoreIds = Array.from(new Set(decision.transferLines.map((l) => l.toStoreId)));
+    const fromStoreNames = Array.from(new Set(decision.transferLines.map((l) => l.fromStoreName))).join(', ');
+    const toStoreNames = treatedStoreIds.map((id) => STORE_MAP[id].name).join(', ');
+    const totalMovedUnits =
+      decision.totalUnits ?? decision.transferLines.reduce((s, l) => s + l.units, 0);
     const holdoutId = decision.holdoutStoreId;
     const holdoutName = holdoutId ? STORE_MAP[holdoutId].name : undefined;
+
+    const movedUnitsFact = createFact(
+      `dfy:${decision.id}:units`,
+      'Units moved',
+      totalMovedUnits,
+      'units',
+      `Moved ${totalMovedUnits} ${grpLabel} units from ${fromStoreNames} to ${toStoreNames} on ${formatShortDate(decision.date)}.`,
+    );
+    const expectedWorthUsd =
+      decision.expectedWorthUsd ??
+      treatedStoreIds.reduce((s, sid) => {
+        const rec = sim.storeRecordsByDate[decision.date]?.[sid];
+        return s + (rec ? rec.groups[groupId].potentialSales * 7 : 0);
+      }, 0);
+    const expectedWorthFact = createFact(
+      `dfy:${decision.id}:worth`,
+      'Expected weekly sales protected',
+      expectedWorthUsd,
+      'USD',
+      `Estimated weekly ${grpLabel} demand protected at ${toStoreNames} from this transfer.`,
+    );
+    const movedSummary = `Moved ${totalMovedUnits} ${grpLabel} units from ${fromStoreNames} to ${toStoreNames} (arriving ${formatShortDate(arrivalDate)}).`;
+    const whySummary =
+      decision.whySummary ??
+      (decision.isAutonomous
+        ? `${toStoreNames} dropped below 2.5 weeks of ${grpLabel} stock left; executed within your 500-unit rule.`
+        : undefined);
+
+    // If owner clicked Undo on or before `date`, mark undone immediately
+    if (decision.undoneOnDate && decision.undoneOnDate <= date) {
+      closedDecisionIds.add(decision.id);
+      undoneDecisionDates.set(decision.id, decision.undoneOnDate);
+      const returnedUnits = decision.unitsReturned ?? totalMovedUnits;
+      const unitsReturnedFact = createFact(
+        `dfy:${decision.id}:returned`,
+        'Unsold units moved back',
+        returnedUnits,
+        'units',
+        `On ${formatShortDate(decision.undoneOnDate)}, ${returnedUnits} unsold ${grpLabel} units were returned from ${toStoreNames} to ${fromStoreNames}.`,
+      );
+      doneForYou.push({
+        decisionId: decision.id,
+        candidateId: decision.candidateId,
+        title: decision.title ?? `${grpLabel} transfer to ${toStoreNames}`,
+        verdict: 'undone',
+        verdictSentence: `Undone on ${formatShortDate(decision.undoneOnDate)}. Unsold units moved back (${unitsReturnedFact.formatted}).`,
+        detailSentence: `Counts against the track record for stock transfers.`,
+        approvedOn: decision.date,
+        closedOn: decision.undoneOnDate,
+        movedUnitsFact,
+        unitsReturnedFact,
+        expectedWorthFact,
+        movedSummary,
+        whySummary,
+        undone: true,
+        isAutonomous: decision.isAutonomous,
+        canUndo: false,
+      });
+      traceEntries.push({
+        id: `trace:${decision.undoneOnDate}:followup:owner_undo:${decision.id}`,
+        date: decision.undoneOnDate,
+        lane: 'manager',
+        kind: 'followup',
+        headline: `Undone by owner: ${decision.title ?? `${grpLabel} transfer to ${toStoreNames}`}`,
+        detail: `Moved ${unitsReturnedFact.formatted} back to ${fromStoreNames}. Counted against the transfer record.`,
+        outcome: 'let_go',
+        facts: [unitsReturnedFact],
+      });
+      continue;
+    }
+
+    // Single-store transfer rule (no held-out control store):
+    // Worked if the group's sales at that store are inside expectation for the 7 days after arrival
+    // and the store did not run out. Labeled honestly: "Before and after, one store: not proven alone."
+    if (!holdoutId && treatedStoreIds.length === 1) {
+      const targetSid = treatedStoreIds[0];
+      const checkEndDate = addDays(arrivalDate, 6);
+
+      if (date < checkEndDate) {
+        if (decision.isAutonomous) {
+          const daysWaiting =
+            date < arrivalDate
+              ? `In transit (arrives ${formatShortDate(arrivalDate)}).`
+              : `Arrived ${formatShortDate(arrivalDate)}; watching 7-day sales until ${formatShortDate(checkEndDate)}.`;
+          doneForYou.push({
+            decisionId: decision.id,
+            candidateId: decision.candidateId,
+            title: decision.title ?? `${grpLabel} transfer to ${toStoreNames}`,
+            verdict: 'autonomous_pending',
+            verdictSentence: `Done without asking (under 500 units). ${daysWaiting}`,
+            approvedOn: decision.date,
+            closedOn: checkEndDate,
+            movedUnitsFact,
+            expectedWorthFact,
+            movedSummary,
+            whySummary,
+            isAutonomous: true,
+            canUndo: true,
+          });
+        } else {
+          const statusText =
+            date < arrivalDate
+              ? `On the way (arrives ${formatShortDate(arrivalDate)}, in ${diffDays(date, arrivalDate)} day${diffDays(date, arrivalDate) === 1 ? '' : 's'})`
+              : `Day ${diffDays(arrivalDate, date) + 1} of 7 since arrival · checking store sales and stock`;
+          inProgress.push({
+            decisionId: decision.id,
+            candidateId: decision.candidateId,
+            title: decision.title ?? `${grpLabel} transfer to ${toStoreNames}`,
+            measure:
+              decision.measure ??
+              `${grpLabel} sales vs expected at ${toStoreNames} for 7 days after arrival`,
+            statusText,
+            nextCheckpoint: `7-day check on ${formatShortDate(checkEndDate)}`,
+            endDate: checkEndDate,
+            arrivalDate,
+          });
+        }
+        continue;
+      }
+
+      const arrIdx = sim.dates.indexOf(arrivalDate);
+      const endIdx = sim.dates.indexOf(checkEndDate);
+      let actSum = 0;
+      let expSum = 0;
+      let ranOut = false;
+
+      if (arrIdx >= 0 && endIdx >= arrIdx) {
+        for (let k = arrIdx; k <= endIdx; k++) {
+          const rec = sim.storeRecordsByDate[sim.dates[k]]?.[targetSid];
+          if (!rec) continue;
+          const g = rec.groups[groupId];
+          actSum += g.actualSales;
+          expSum += (rec.expectedSales ?? rec.potentialSales) * grpShare;
+          if (!g.hadStock || g.endingStock <= 0.001) {
+            ranOut = true;
+          }
+        }
+      }
+
+      const ratio = expSum > 0 ? actSum / expSum : 1;
+      const insideExpectation = ratio >= 0.88 && ratio <= 1.25 && !ranOut;
+      closedDecisionIds.add(decision.id);
+
+      const act7dFact = createFact(
+        `proof:${decision.id}:single_act:${checkEndDate}`,
+        `${toStoreNames} 7-day ${grpLabel} sales`,
+        actSum,
+        'USD',
+        `${grpLabel} sales at ${toStoreNames} from ${arrivalDate} to ${checkEndDate} vs expected ($${Math.round(expSum).toLocaleString('en-US')}).`,
+      );
+
+      if (insideExpectation) {
+        const verdictSentence = 'Worked. Before and after, one store: not proven alone.';
+        const detailSentence = `${toStoreNames} sold ${act7dFact.formatted} of ${grpLabel} in the 7 days after arrival (inside expectation) and never ran out of stock.`;
+        doneForYou.push({
+          decisionId: decision.id,
+          candidateId: decision.candidateId,
+          title: decision.title ?? `${grpLabel} transfer to ${toStoreNames}`,
+          verdict: 'worked_single_store',
+          verdictSentence,
+          detailSentence,
+          approvedOn: decision.date,
+          closedOn: checkEndDate,
+          movedUnitsFact,
+          expectedWorthFact,
+          movedSummary,
+          whySummary,
+          isAutonomous: decision.isAutonomous,
+          canUndo: Boolean(decision.isAutonomous),
+        });
+        traceEntries.push({
+          id: `trace:${checkEndDate}:followup:single_ok:${decision.id}`,
+          date: checkEndDate,
+          lane: 'manager',
+          kind: 'followup',
+          headline: `${verdictSentence} (${toStoreNames} ${grpLabel})`,
+          detail: detailSentence,
+          outcome: 'raised',
+          facts: [act7dFact],
+        });
+        traceEntries.push({
+          id: `trace:${checkEndDate}:ds:single_ok:${decision.id}`,
+          date: checkEndDate,
+          lane: 'data_scientist',
+          kind: 'followup',
+          headline: `7-day before-and-after check: ${toStoreNames} ${grpLabel}`,
+          detail: `${act7dFact.formatted} vs expected (${(ratio * 100).toFixed(0)}%, zero stockouts). No held-out store, so marked not proven alone.`,
+          outcome: 'info',
+          facts: [act7dFact],
+        });
+      } else {
+        undoneDecisionDates.set(decision.id, checkEndDate);
+        const verdictSentence = ranOut
+          ? 'Did not work. Store ran out of stock within 7 days.'
+          : 'Did not work. Sales stayed below expectation.';
+        const detailSentence = `${toStoreNames} ${grpLabel} reached ${(ratio * 100).toFixed(0)}% of expectation over 7 days${ranOut ? ' and ran out of stock' : ''}.`;
+        doneForYou.push({
+          decisionId: decision.id,
+          candidateId: decision.candidateId,
+          title: decision.title ?? `${grpLabel} transfer to ${toStoreNames}`,
+          verdict: 'did_not_work',
+          verdictSentence,
+          detailSentence,
+          approvedOn: decision.date,
+          closedOn: checkEndDate,
+          movedUnitsFact,
+          expectedWorthFact,
+          movedSummary,
+          whySummary,
+          isAutonomous: decision.isAutonomous,
+          canUndo: false,
+        });
+        traceEntries.push({
+          id: `trace:${checkEndDate}:followup:single_fail:${decision.id}`,
+          date: checkEndDate,
+          lane: 'manager',
+          kind: 'followup',
+          headline: `${verdictSentence} (${toStoreNames} ${grpLabel})`,
+          detail: detailSentence,
+          outcome: 'let_go',
+          facts: [act7dFact],
+        });
+      }
+      continue;
+    }
 
     if (date < arrivalDate) {
       if (holdoutId) activeControlStores.add(holdoutId);
@@ -237,7 +467,7 @@ export function evaluateActionsUpToDate(params: {
         measure:
           decision.measure ??
           `Daily sales vs expected at ${treatedStoreIds.map((id) => STORE_MAP[id].name).join(', ')}`,
-        statusText: `In transit (arrives ${formatShortDate(arrivalDate)}, in ${daysToArrive} day${daysToArrive === 1 ? '' : 's'})`,
+        statusText: `On the way (arrives ${formatShortDate(arrivalDate)}, in ${daysToArrive} day${daysToArrive === 1 ? '' : 's'})`,
         nextCheckpoint: `7-day check on ${formatShortDate(addDays(arrivalDate, 7))}`,
         endDate,
         arrivalDate,
@@ -246,7 +476,7 @@ export function evaluateActionsUpToDate(params: {
       continue;
     }
 
-    // Walk daily from arrivalDate up to `date`
+    // Walk daily from arrivalDate up to `date` (multi-store / holdout comparison)
     const arrivalIdx = sim.dates.indexOf(arrivalDate);
     const dateIdx = sim.dates.indexOf(date);
     let consecPositive = 0;
@@ -256,7 +486,6 @@ export function evaluateActionsUpToDate(params: {
     let closedOn = date;
     let latestGapPts = 0;
 
-    // Pre-arrival 7d ratio fallback if no holdout store (e.g. rollout or <3 stores)
     let preArrivalRatio = 1.0;
     if (!holdoutId && arrivalIdx >= 7) {
       let preAct = 0;
@@ -371,7 +600,7 @@ export function evaluateActionsUpToDate(params: {
           decision.measure ??
           `Daily sales vs expected at ${treatedStoreIds.map((id) => STORE_MAP[id].name).join(', ')}`,
         statusText: holdoutName
-          ? `Day ${daysSinceArr + 1} since arrival · gap ${latestGapPts >= 0 ? '+' : ''}${latestGapPts.toFixed(1)} pts vs ${holdoutName}`
+          ? `Day ${daysSinceArr + 1} since arrival · ${latestGapPts >= 0 ? '+' : ''}${latestGapPts.toFixed(1)} pts ahead of ${holdoutName}`
           : `Day ${daysSinceArr + 1} since arrival · ${consecPositive}/7 days > +10 pts`,
         nextCheckpoint: checkpointLabel,
         endDate,
@@ -406,6 +635,8 @@ export function evaluateActionsUpToDate(params: {
         approvedOn: decision.date,
         closedOn,
         provenMoneyFact,
+        movedUnitsFact,
+        movedSummary,
         holdoutStoreName: holdoutName,
       });
 
@@ -434,7 +665,6 @@ export function evaluateActionsUpToDate(params: {
       // Raise follow-on rollout card for the held-out store if not already handled
       const rolloutId = `rollout:${decision.id}`;
       if (holdoutId && !handledRolloutIds.has(rolloutId)) {
-        // Keep control store suppressed from duplicate stock_running_out while rollout card is pending owner's tap
         activeControlStores.add(holdoutId);
 
         const { plan: rolloutPlan } = buildTransferPlanForGroup({

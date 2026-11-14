@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, Check, Play, X } from 'lucide-react';
+import { ArrowLeft, Check, Download, Play, X } from 'lucide-react';
 import { BuilderRequirement, DiagnosticReport, RefundRecord, ToolTestCaseResult } from '../types/domain';
 import { runSandboxedToolTests } from '../builder/tester';
 
@@ -169,6 +169,15 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
     }
   };
 
+  const handleSaveRecordedRun = () => {
+    const a = document.createElement('a');
+    a.href = '/api/recorded-run/export';
+    a.download = 'recorded_run.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-[#171717] px-4 py-8 sm:px-8">
       <div className="max-w-4xl mx-auto">
@@ -181,14 +190,24 @@ export function DevDiagnosticsPage({ report, onBack }: DevDiagnosticsPageProps) 
               Gemini Connection Tests &amp; Live Window Timeline
             </h1>
           </div>
-          <button
-            type="button"
-            onClick={onBack}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-white border border-[#E6E1D8] rounded-lg hover:bg-[#F3F0EA] transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Back to clock</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSaveRecordedRun}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-[#312E81] hover:bg-[#26236B] text-white rounded-lg transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Save this run</span>
+            </button>
+            <button
+              type="button"
+              onClick={onBack}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium bg-white border border-[#E6E1D8] rounded-lg hover:bg-[#F3F0EA] transition-colors cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to clock</span>
+            </button>
+          </div>
         </div>
 
         {/* Stage 2 Connection Test Panel */}

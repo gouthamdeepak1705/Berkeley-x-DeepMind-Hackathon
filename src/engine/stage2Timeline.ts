@@ -1,15 +1,23 @@
 import { createHash } from 'node:crypto';
+import { evaluateAutonomyRecord } from '../autonomy/record';
 import { computeExpectedFlaggedStats } from '../builder/builder';
 import { runSituationInvestigation } from '../checker/checker';
 import { buildTransferPlanForGroup } from '../checker/transferPlan';
 import { runDetectorsForDay } from '../detectors/detectors';
 import { applySilenceChecks } from '../detectors/silenceChecks';
 import { evaluateActionsUpToDate } from '../followup/proof';
-import { getGatewayAttemptLog } from '../gateway/gateway';
+import {
+  getGeminiCapBanner,
+  getGeminiPlaybackMode,
+  getGeminiUsageSummary,
+} from '../gemini/client';
+import { executeActionThroughGateway, getGatewayAttemptLog } from '../gateway/gateway';
+import { buildEndStatement } from '../statement/statement';
 import { evaluateWatcherBatch, WatcherSubjectOutcome } from '../watcher/watcher';
 import { WatcherSubject } from '../watcher/briefing';
 import {
   ActionDecision,
+  AutonomyReaction,
   BuiltToolRecord,
   Candidate,
   CardReaction,
@@ -45,6 +53,7 @@ export interface Stage2StepResponse {
   dayState: DayState;
   sim: SimulationRun;
   pendingSituation?: RaisedItem;
+  decisions: ActionDecision[];
 }
 
 interface InternalSituation {
@@ -262,6 +271,7 @@ function addInvestigationTraceEntries(
   inv: InvestigationResult,
 ): void {
   const modeLabel = inv.mode === 'fallback' ? 'fallback, Gemini not used' : inv.mode;
+  const routineTag = inv.jobKey === 'investigate_routine' ? 'routine kind, fast model · ' : '';
   for (const t of inv.toolTrace) {
     allTrace.push({
       id: `trace:${date}:ds:tool:${inv.candidateId}:r${t.round}:${t.toolName}:${allTrace.length}`,
@@ -269,7 +279,7 @@ function addInvestigationTraceEntries(
       lane: 'data_scientist',
       kind: 'tool_call',
       headline: `${t.toolName} (${t.argsSummary})`,
-      detail: `${situationTitle} · ${inv.model} (${modeLabel}, ${inv.latencyMs} ms total) · Facts returned: ${t.factIds.join(', ') || 'none'}`,
+      detail: `${routineTag}${situationTitle} · ${inv.model} (${modeLabel}, ${inv.latencyMs} ms total) · Facts returned: ${t.factIds.join(', ') || 'none'}`,
       outcome: 'info',
       facts: t.facts.slice(0, 4).map(cloneFact),
       meta: {
@@ -314,7 +324,7 @@ function addInvestigationTraceEntries(
       inv.status === 'let_go'
         ? `Checked & let go: ${situationTitle}`
         : `Confirmed: ${situationTitle}`,
-    detail: `Model ${inv.model} (${inv.mode}, ${inv.latencyMs} ms)${inv.usedFallbackWording ? ' · code wording fallback used' : ''} · Outcome: ${inv.outcomeKind.replace(/_/g, ' ')} — ${inv.outcomeDetail}`,
+    detail: `${routineTag}Model ${inv.model} (${inv.mode}, ${inv.latencyMs} ms)${inv.usedFallbackWording ? ' · code wording fallback used' : ''} · Outcome: ${inv.outcomeKind.replace(/_/g, ' ')} — ${inv.outcomeDetail}`,
     outcome: inv.status === 'let_go' ? 'let_go' : 'raised',
     meta: {
       model: inv.model,
@@ -342,6 +352,10 @@ function shouldMateriallyReask(
   if (stakeDiff >= 0.15) return true;
   if (diffDays(prev.lastAskedOn, date) >= 5) return true;
   return false;
+}
+
+function storesMapSizeKey(sit: InternalSituation): string {
+  return Array.from(sit.stores.keys()).sort().join(',');
 }
 
 function buildRaisedItemSnapshot(
@@ -489,6 +503,7 @@ interface TimelineLoopSnapshot {
   deferredSituations: Map<string, DeferredSituationState>;
   dismissedSituations: Set<string>;
   approvedSituations: Set<string>;
+  approvedStockStores: Map<string, Set<StoreId>>;
   handledRolloutIds: Set<string>;
   openStockByGroup: Map<'best_sellers' | 'knitwear', Map<StoreId, string>>;
   activeEpisodeSituation: Map<string, string>;
@@ -501,6 +516,7 @@ interface TimelineLoopSnapshot {
   emittedFollowUpIds: Set<string>;
   lookedUpInvKeys: Set<string>;
   hadPendingTarget: boolean;
+  decisions: ActionDecision[];
 }
 
 function cloneSituation(sit: InternalSituation): InternalSituation {
@@ -551,6 +567,10 @@ function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
   for (const [k, v] of snap.deferredSituations.entries()) {
     deferredSituations.set(k, { ...v });
   }
+  const approvedStockStores = new Map<string, Set<StoreId>>();
+  for (const [k, s] of snap.approvedStockStores.entries()) {
+    approvedStockStores.set(k, new Set(s));
+  }
   const openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
   for (const [k, m] of snap.openStockByGroup.entries()) {
     openStockByGroup.set(k, new Map(m));
@@ -569,6 +589,7 @@ function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
     deferredSituations,
     dismissedSituations: new Set(snap.dismissedSituations),
     approvedSituations: new Set(snap.approvedSituations),
+    approvedStockStores,
     handledRolloutIds: new Set(snap.handledRolloutIds),
     openStockByGroup,
     activeEpisodeSituation: new Map(snap.activeEpisodeSituation),
@@ -581,6 +602,10 @@ function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
     emittedFollowUpIds: new Set(snap.emittedFollowUpIds),
     lookedUpInvKeys: new Set(snap.lookedUpInvKeys),
     hadPendingTarget: snap.hadPendingTarget,
+    decisions: snap.decisions.map((d) => ({
+      ...d,
+      transferLines: d.transferLines ? d.transferLines.map((l) => ({ ...l })) : undefined,
+    })),
   };
 }
 
@@ -625,10 +650,15 @@ export async function evaluateStage2UpToDay(params: {
   reviewedRefundIds?: string[];
   /** Stage 4 extra Developer trace entries */
   builderTraceEntries?: TraceEntry[];
+  /** Stage 5 owner responses to Indigo autonomy offers */
+  autonomyReactions?: AutonomyReaction[];
 }): Promise<Stage2StepResponse> {
   const seed = params.seed ?? DEFAULT_SEED;
   let decisions = (params.decisions ?? []).map((d) => ({ ...d }));
   const reactions = [...(params.reactions ?? [])].sort((a, b) =>
+    a.date === b.date ? 0 : a.date < b.date ? -1 : 1,
+  );
+  const autonomyReactions = [...(params.autonomyReactions ?? [])].sort((a, b) =>
     a.date === b.date ? 0 : a.date < b.date ? -1 : 1,
   );
   const baseControlStores = params.controlStores ?? new Set<string>();
@@ -648,8 +678,11 @@ export async function evaluateStage2UpToDay(params: {
       transferLines: d.transferLines ?? null,
     })),
   });
-  let sim = simRunCache.get(decisionsKey);
-  if (!sim) {
+  const cachedSim = simRunCache.get(decisionsKey);
+  let sim: SimulationRun;
+  if (cachedSim) {
+    sim = cachedSim;
+  } else {
     sim = runSimulation(seed, decisions, LIVE_END_DATE);
     if (simRunCache.size > 24) simRunCache.clear();
     simRunCache.set(decisionsKey, sim);
@@ -667,7 +700,7 @@ export async function evaluateStage2UpToDay(params: {
   if (preFollowUp.undoneDecisionDates.size > 0) {
     decisions = decisions.map((d) => {
       const undoD = preFollowUp.undoneDecisionDates.get(d.id);
-      return undoD ? { ...d, undoneOnDate: undoD } : d;
+      return undoD && !d.undoneOnDate ? { ...d, undoneOnDate: undoD } : d;
     });
     const simUndoDecisions = decisions.filter((d) => d.kind !== 'store_manager_task');
     const undoKey = hashStateKey({
@@ -688,11 +721,14 @@ export async function evaluateStage2UpToDay(params: {
     sim = undoSim;
   }
 
-  const contextDecisions = decisions.filter((d) => d.kind !== 'store_manager_task');
+  const contextDecisions = decisions.filter(
+    (d) => d.kind !== 'store_manager_task' && !(d.isAutonomous && !d.undoneOnDate),
+  );
   const contextKey = hashStateKey({
     seed,
-    decisions: contextDecisions.map((d) => ({ id: d.id, date: d.date, kind: d.kind, undoneOnDate: d.undoneOnDate ?? null })),
+    decisions: contextDecisions.map((d) => ({ id: d.id, date: d.date, kind: d.kind, undoneOnDate: d.undoneOnDate ?? null, isAutonomous: Boolean(d.isAutonomous) })),
     reactions: reactions.map((r) => ({ id: r.id, candidateId: r.candidateId, date: r.date, reaction: r.reaction })),
+    autonomyReactions: autonomyReactions.map((ar) => ({ id: ar.id, offerId: ar.offerId, date: ar.date, reaction: ar.reaction })),
     controlStores: Array.from(baseControlStores).sort(),
     builtTools: builtTools.map((t) => ({ id: t.id, installedOn: t.installedOn, mode: t.mode })),
     reviewedRefundIds: [...reviewedRefundIds].sort(),
@@ -714,6 +750,7 @@ export async function evaluateStage2UpToDay(params: {
   let deferredSituations = new Map<string, DeferredSituationState>();
   let dismissedSituations = new Set<string>();
   let approvedSituations = new Set<string>();
+  let approvedStockStores = new Map<string, Set<StoreId>>();
   let handledRolloutIds = new Set<string>();
   let openStockByGroup = new Map<'best_sellers' | 'knitwear', Map<StoreId, string>>();
   let activeEpisodeSituation = new Map<string, string>();
@@ -729,12 +766,9 @@ export async function evaluateStage2UpToDay(params: {
   for (let probe = clampedTarget; probe >= 0; probe--) {
     const snap = cacheBucket.get(probe);
     if (!snap) continue;
-    // If probing the target day itself and it previously stopped on a pending situation, step from probe - 1
-    // so either pendingSituation is returned for SSE streaming or investigateTargetDay=true runs it
     if (probe === clampedTarget && snap.hadPendingTarget) {
       continue;
     }
-    // Check that none of the investigations looked up on days <= probe changed since this snapshot was saved
     let mismatch = false;
     for (const invKey of snap.lookedUpInvKeys) {
       const snapInv = snap.completedInvestigations.get(invKey);
@@ -751,6 +785,7 @@ export async function evaluateStage2UpToDay(params: {
     deferredSituations = cloned.deferredSituations;
     dismissedSituations = cloned.dismissedSituations;
     approvedSituations = cloned.approvedSituations;
+    approvedStockStores = cloned.approvedStockStores;
     handledRolloutIds = cloned.handledRolloutIds;
     openStockByGroup = cloned.openStockByGroup;
     activeEpisodeSituation = cloned.activeEpisodeSituation;
@@ -758,7 +793,6 @@ export async function evaluateStage2UpToDay(params: {
     watchedMap = cloned.watchedMap;
     allTrace = cloned.allTrace;
     watcherEvalLog = cloned.watcherEvalLog;
-    // Merge provided investigations (e.g. newly completed on later day) with cached ones
     completedInvestigations = new Map(cloned.completedInvestigations);
     for (const [ik, iv] of providedInvMap.entries()) {
       completedInvestigations.set(ik, iv);
@@ -766,6 +800,28 @@ export async function evaluateStage2UpToDay(params: {
     lastTodayCandidates = cloned.lastTodayCandidates;
     emittedFollowUpIds = cloned.emittedFollowUpIds;
     for (const ik of cloned.lookedUpInvKeys) lookedUpInvKeys.add(ik);
+    const existingDecisionIds = new Set(decisions.map((d) => d.id));
+    const mergedFromSnap = cloned.decisions.filter((d) => !existingDecisionIds.has(d.id));
+    if (mergedFromSnap.length > 0) {
+      decisions = [...decisions, ...mergedFromSnap];
+      const restoredSimDecisions = decisions.filter((d) => d.kind !== 'store_manager_task');
+      const restoredKey = hashStateKey({
+        seed,
+        decisions: restoredSimDecisions.map((d) => ({
+          id: d.id,
+          date: d.date,
+          kind: d.kind,
+          undoneOnDate: d.undoneOnDate ?? null,
+          transferLines: d.transferLines ?? null,
+        })),
+      });
+      let restoredSim = simRunCache.get(restoredKey);
+      if (!restoredSim) {
+        restoredSim = runSimulation(seed, decisions, LIVE_END_DATE);
+        simRunCache.set(restoredKey, restoredSim);
+      }
+      sim = restoredSim;
+    }
     resumeFromDay = probe;
     break;
   }
@@ -775,64 +831,11 @@ export async function evaluateStage2UpToDay(params: {
   for (let i = resumeFromDay + 1; i <= clampedTarget; i++) {
     const date = sim.liveDates[i];
 
-    // Process any reactions on this day
-    for (const r of reactions) {
-      if (r.date !== date) continue;
-      if (r.candidateId.startsWith('rollout:') && (r.reaction === 'approve' || r.reaction === 'dismiss')) {
-        handledRolloutIds.add(r.candidateId);
-      }
-      const readableName =
-        openSituations.get(r.candidateId)?.title ?? formatReadableCandidateName(r.candidateId);
-      if (r.reaction === 'approve') {
-        approvedSituations.add(r.candidateId);
-        deferredSituations.delete(r.candidateId);
-        openSituations.delete(r.candidateId);
-        allTrace.push({
-          id: `trace:${date}:mgr:react:${r.id}`,
-          date,
-          lane: 'manager',
-          kind: 'note',
-          headline: `Owner approved: ${readableName}`,
-          detail: r.detail ?? `Approved by owner on ${formatShortDate(date)}.`,
-          outcome: 'raised',
-        });
-      } else if (r.reaction === 'dismiss') {
-        dismissedSituations.add(r.candidateId);
-        deferredSituations.delete(r.candidateId);
-        openSituations.delete(r.candidateId);
-        allTrace.push({
-          id: `trace:${date}:mgr:react:${r.id}`,
-          date,
-          lane: 'manager',
-          kind: 'note',
-          headline: `Owner dismissed (${(r.reason ?? 'other').replace(/_/g, ' ')})`,
-          detail: `${readableName} dismissed by owner on ${formatShortDate(date)}.`,
-          outcome: 'let_go',
-        });
-      } else if (r.reaction === 'not_now') {
-        const sit = openSituations.get(r.candidateId);
-        deferredSituations.set(r.candidateId, {
-          deferredOn: date,
-          evidenceCountAtDefer: sit ? sit.evidence.size : 0,
-          consecutiveLostDaysAfterDefer: 0,
-        });
-        if (sit) sit.deferredOn = date;
-        allTrace.push({
-          id: `trace:${date}:mgr:react:${r.id}`,
-          date,
-          lane: 'manager',
-          kind: 'note',
-          headline: `Owner deferred (Not now): ${readableName}`,
-          detail: `Card hidden on ${formatShortDate(date)}; continuing to check daily and will re-raise if it worsens.`,
-          outcome: 'info',
-        });
-      }
-    }
-
-    // Evaluate active actions/proofs & derive held-out control stores for `date`
+    // Evaluate active actions/proofs & derive held-out control stores strictly from prior-day decisions (< date) for morning detection
+    const priorDayDecisions = decisions.filter((d) => d.date < date);
     const dayFollowUp = evaluateActionsUpToDate({
       sim,
-      decisions,
+      decisions: priorDayDecisions,
       date,
       handledRolloutIds,
     });
@@ -848,7 +851,17 @@ export async function evaluateStage2UpToDay(params: {
       ...dayFollowUp.activeControlStores,
     ]);
 
-    const rawCandidates = runDetectorsForDay(sim, date);
+    const rawCandidates = runDetectorsForDay(sim, date).map((rc) => {
+      if (
+        !rc.groundTruth &&
+        rc.storeId &&
+        effectiveControlStores.has(rc.storeId) &&
+        (rc.kind === 'stock_running_out' || rc.kind === 'drop_or_jump' || rc.kind === 'store_out_of_line')
+      ) {
+        return { ...rc, groundTruth: 'near_miss:control_store_fall' as const };
+      }
+      return rc;
+    });
     const todayCandidates = rawCandidates.map((rc) =>
       applySilenceChecks(rc, sim, date, decisions, effectiveControlStores),
     );
@@ -1026,24 +1039,30 @@ export async function evaluateStage2UpToDay(params: {
     for (const [grpId, members] of pendingStockByGroup.entries()) {
       const key = `situation:stock_running_out:${grpId}`;
       if (dismissedSituations.has(key) || approvedSituations.has(key)) continue;
+      const appSet = approvedStockStores.get(grpId);
+      const waveMembers = appSet
+        ? members.filter((m) => !m.storeId || !appSet.has(m.storeId))
+        : members;
+      if (waveMembers.length === 0) continue;
+
       const weekKey = getIsoWeekKey(date);
       const letGoKey = `${key}:letgo:${weekKey}`;
       if (letGoMap.has(letGoKey)) continue;
 
-      const primary = members.reduce((a, b) =>
+      const primary = waveMembers.reduce((a, b) =>
         b.stakePerWeek.value > a.stakePerWeek.value ? b : a,
       );
-      const totalStake = members.reduce((s, m) => s + m.stakePerWeek.value, 0);
+      const totalStake = waveMembers.reduce((s, m) => s + m.stakePerWeek.value, 0);
       const prevWatch = watchedMap.get(key);
       if (
         prevWatch &&
-        !shouldMateriallyReask(prevWatch, primary, members.length, date)
+        !shouldMateriallyReask(prevWatch, primary, waveMembers.length, date)
       ) {
         continue;
       }
 
       const grpName = getGroupDisplayName(grpId);
-      const storeNames = members
+      const storeNames = waveMembers
         .map((m) => (m.storeId ? STORE_MAP[m.storeId].name : ''))
         .filter(Boolean);
 
@@ -1051,7 +1070,7 @@ export async function evaluateStage2UpToDay(params: {
         key,
         title: `${grpName} running short — ${storeNames.join(', ')}`,
         primaryCandidate: primary,
-        memberCandidates: members,
+        memberCandidates: waveMembers,
         evidenceSummaries: [],
         stakePerWeekUsd: totalStake,
         daysVisible: prevWatch ? diffDays(prevWatch.firstSeenOn, date) + 1 : 1,
@@ -1111,7 +1130,7 @@ export async function evaluateStage2UpToDay(params: {
         letGoSummaries,
         decisions,
         controlStores: effectiveControlStores,
-        builtTools,
+        builtTools: builtTools.filter((t) => t.installedOn < date),
         reviewedRefundIds,
       });
 
@@ -1381,9 +1400,104 @@ export async function evaluateStage2UpToDay(params: {
 
         openSituations.set(newSit.id, newSit);
 
-        // Check if an investigation already exists or needs to run
-        lookedUpInvKeys.add(newSit.id);
-        const existingInv = completedInvestigations.get(newSit.id);
+        // Key completedInvestigations per episode wave so Knitwear multi-store waves investigate independently
+        const invLookupKey =
+          cand.kind === 'stock_running_out' && cand.groupId === 'knitwear' && storesMapSizeKey(newSit)
+            ? `${newSit.id}:${storesMapSizeKey(newSit)}:${newSit.firstDetectedOn}`
+            : newSit.id;
+        lookedUpInvKeys.add(invLookupKey);
+
+        const dayAutonomy = evaluateAutonomyRecord({
+          date,
+          decisions,
+          doneForYou: dayFollowUp.doneForYou,
+          autonomyReactions,
+        });
+        const autonomyActiveNow = dayAutonomy.level === 'autonomous_within_limits';
+
+        const tryAutonomousExecution = (invResult: InvestigationResult): boolean => {
+          if (!autonomyActiveNow) return false;
+          if (newSit.detectorKind !== 'stock_running_out') return false;
+          const plan = invResult.transferPlan;
+          if (
+            !plan ||
+            plan.receiverStoreIds.length !== 1 ||
+            Boolean(plan.holdoutStoreId) ||
+            plan.totalUnitsFact.value <= 0 ||
+            plan.totalUnitsFact.value > 500 ||
+            plan.transferLines.length === 0
+          ) {
+            return false;
+          }
+
+          const targetNames = plan.receiverStoreIds.map((sid) => STORE_MAP[sid].name).join(', ');
+          const gw = executeActionThroughGateway(
+            {
+              candidateId: newSit.id,
+              date,
+              kind: 'transfer',
+              groupId: plan.groupId,
+              ownerApproved: false,
+              autonomous: true,
+              autonomyGranted: true,
+              approvedBy: 'Autonomy within limits',
+              plan,
+              whySummary: `${targetNames} dropped below 2.5 weeks of ${plan.groupName} stock left; executed without asking within your 500-unit rule.`,
+              expectedWorthUsd: plan.weeklyRecoveryFact.value,
+            },
+            sim,
+          );
+          if (!gw.ok || !gw.decision) {
+            return false;
+          }
+
+          if (!decisions.some((d) => d.id === gw.decision!.id)) {
+            decisions = [...decisions, gw.decision];
+            sim = runSimulation(seed, decisions, LIVE_END_DATE);
+            const refreshedKey = hashStateKey({
+              seed,
+              decisions: decisions
+                .filter((d) => d.kind !== 'store_manager_task')
+                .map((d) => ({
+                  id: d.id,
+                  date: d.date,
+                  kind: d.kind,
+                  undoneOnDate: d.undoneOnDate ?? null,
+                  transferLines: d.transferLines ?? null,
+                })),
+            });
+            simRunCache.set(refreshedKey, sim);
+          }
+
+          // Mark store(s) handled & close open situation cleanly
+          const grpId = plan.groupId;
+          let appSet = approvedStockStores.get(grpId);
+          if (!appSet) {
+            appSet = new Set();
+            approvedStockStores.set(grpId, appSet);
+          }
+          for (const sid of plan.receiverStoreIds) appSet.add(sid);
+          openSituations.delete(newSit.id);
+          openStockByGroup.delete(grpId);
+          watchedMap.delete(newSit.id);
+
+          allTrace.push({
+            id: `trace:${date}:mgr:auto:${gw.decision.id}`,
+            date,
+            lane: 'manager',
+            kind: 'gateway',
+            headline: `Done within your rules: ${gw.decision.title} (${gw.decision.totalUnits} units)`,
+            detail: `${gw.decision.whySummary ?? ''} Checked every safety limit through the gateway with no approval step.`,
+            outcome: 'raised',
+            facts: [plan.totalUnitsFact, plan.weeklyRecoveryFact],
+          });
+          return true;
+        };
+
+        const isKnitwearWave = cand.kind === 'stock_running_out' && cand.groupId === 'knitwear';
+        const existingInv = isKnitwearWave
+          ? completedInvestigations.get(invLookupKey)
+          : completedInvestigations.get(invLookupKey) ?? completedInvestigations.get(newSit.id);
         if (existingInv) {
           newSit.investigation = existingInv;
           addInvestigationTraceEntries(allTrace, date, subj.title, existingInv);
@@ -1410,8 +1524,16 @@ export async function evaluateStage2UpToDay(params: {
               model: existingInv.model,
               mode: existingInv.mode,
             });
+          } else {
+            tryAutonomousExecution(existingInv);
           }
-        } else if (i < clampedTarget || params.investigateTargetDay) {
+        } else if (
+          i < clampedTarget ||
+          params.investigateTargetDay ||
+          (autonomyActiveNow &&
+            newSit.detectorKind === 'stock_running_out' &&
+            newSit.stores.size <= 1)
+        ) {
           const snap = buildRaisedItemSnapshot(newSit, date, sim);
           const inv = await runSituationInvestigation({
             situation: snap,
@@ -1419,6 +1541,7 @@ export async function evaluateStage2UpToDay(params: {
             date,
             controlStores: effectiveControlStores,
           });
+          completedInvestigations.set(invLookupKey, inv);
           completedInvestigations.set(newSit.id, inv);
           newSit.investigation = inv;
           addInvestigationTraceEntries(allTrace, date, snap.title, inv);
@@ -1445,9 +1568,10 @@ export async function evaluateStage2UpToDay(params: {
               model: inv.model,
               mode: inv.mode,
             });
+          } else {
+            tryAutonomousExecution(inv);
           }
         } else {
-          // On targetDayIndex and not yet investigated: return pendingSituation so client streams live!
           pendingSituation = buildRaisedItemSnapshot(newSit, date, sim);
         }
       }
@@ -1605,7 +1729,80 @@ export async function evaluateStage2UpToDay(params: {
       }
     }
 
-    // Cache end-of-day snapshot so advancing to day i+1 reuses days 0..i cleanly
+    // Apply owner reactions from `date` AFTER morning detectors/watcher run so morning detection & eval log are preserved
+    for (const r of reactions) {
+      if (r.date !== date) continue;
+      if (r.candidateId.startsWith('rollout:') && (r.reaction === 'approve' || r.reaction === 'dismiss')) {
+        handledRolloutIds.add(r.candidateId);
+      }
+      const readableName =
+        openSituations.get(r.candidateId)?.title ?? formatReadableCandidateName(r.candidateId);
+      if (r.reaction === 'approve') {
+        if (r.candidateId.startsWith('situation:stock_running_out:')) {
+          const grpId = r.candidateId.split(':')[2] as 'best_sellers' | 'knitwear';
+          const openSit = openSituations.get(r.candidateId);
+          let appSet = approvedStockStores.get(grpId);
+          if (!appSet) {
+            appSet = new Set();
+            approvedStockStores.set(grpId, appSet);
+          }
+          if (openSit) {
+            for (const sid of openSit.stores.keys()) appSet.add(sid);
+          }
+          for (const d of decisions) {
+            if (d.candidateId === r.candidateId && d.date <= date) {
+              for (const l of d.transferLines ?? []) appSet.add(l.toStoreId);
+            }
+          }
+          openStockByGroup.delete(grpId);
+          watchedMap.delete(r.candidateId);
+        } else {
+          approvedSituations.add(r.candidateId);
+        }
+        deferredSituations.delete(r.candidateId);
+        openSituations.delete(r.candidateId);
+        allTrace.push({
+          id: `trace:${date}:mgr:react:${r.id}`,
+          date,
+          lane: 'manager',
+          kind: 'note',
+          headline: `Owner approved: ${readableName}`,
+          detail: r.detail ?? `Approved by owner on ${formatShortDate(date)}.`,
+          outcome: 'raised',
+        });
+      } else if (r.reaction === 'dismiss') {
+        dismissedSituations.add(r.candidateId);
+        deferredSituations.delete(r.candidateId);
+        openSituations.delete(r.candidateId);
+        allTrace.push({
+          id: `trace:${date}:mgr:react:${r.id}`,
+          date,
+          lane: 'manager',
+          kind: 'note',
+          headline: `Owner dismissed (${(r.reason ?? 'other').replace(/_/g, ' ')})`,
+          detail: `${readableName} dismissed by owner on ${formatShortDate(date)}.`,
+          outcome: 'let_go',
+        });
+      } else if (r.reaction === 'not_now') {
+        const sit = openSituations.get(r.candidateId);
+        deferredSituations.set(r.candidateId, {
+          deferredOn: date,
+          evidenceCountAtDefer: sit ? sit.evidence.size : 0,
+          consecutiveLostDaysAfterDefer: 0,
+        });
+        if (sit) sit.deferredOn = date;
+        allTrace.push({
+          id: `trace:${date}:mgr:react:${r.id}`,
+          date,
+          lane: 'manager',
+          kind: 'note',
+          headline: `Owner deferred (Not now): ${readableName}`,
+          detail: `Card hidden on ${formatShortDate(date)}; continuing to check daily and will re-raise if it worsens.`,
+          outcome: 'info',
+        });
+      }
+    }
+
     const isPendingOnThisDay = Boolean(pendingSituation && i === clampedTarget);
     cacheBucket.set(
       i,
@@ -1615,6 +1812,7 @@ export async function evaluateStage2UpToDay(params: {
         deferredSituations,
         dismissedSituations,
         approvedSituations,
+        approvedStockStores,
         handledRolloutIds,
         openStockByGroup,
         activeEpisodeSituation,
@@ -1627,6 +1825,7 @@ export async function evaluateStage2UpToDay(params: {
         emittedFollowUpIds,
         lookedUpInvKeys,
         hadPendingTarget: isPendingOnThisDay,
+        decisions,
       }),
     );
   }
@@ -1749,6 +1948,35 @@ export async function evaluateStage2UpToDay(params: {
     );
   }
 
+  const autonomyRecord = evaluateAutonomyRecord({
+    date: targetDate,
+    decisions,
+    doneForYou: finalFollowUp.doneForYou,
+    autonomyReactions,
+  });
+
+  const isFinalDay = clampedTarget === sim.liveDates.length - 1;
+  const geminiUsage = getGeminiUsageSummary();
+  const endStatement = isFinalDay
+    ? buildEndStatement({
+        seed,
+        date: targetDate,
+        sim,
+        decisions,
+        doneForYou: finalFollowUp.doneForYou,
+        watcherEvalLog,
+        allTrace,
+        builtTools: visibleBuiltTools,
+        liveUsage: {
+          totalCalls: geminiUsage.totalCalls,
+          uncachedDecisionCalls: geminiUsage.uncachedDecisionCalls,
+          uncachedOtherCalls: geminiUsage.uncachedOtherCalls,
+          fallbackCalls: geminiUsage.fallbackCalls,
+          estimatedCostUsd: geminiUsage.estimatedCostUsd,
+        },
+      })
+    : undefined;
+
   return {
     dayState: {
       date: targetDate,
@@ -1771,8 +1999,14 @@ export async function evaluateStage2UpToDay(params: {
       reviewedRefundIds,
       refundRows,
       toolUnreviewedFact,
+      autonomyRecord,
+      lostAutonomyReason: autonomyRecord.lostAutonomyReason,
+      endStatement,
+      geminiMode: getGeminiPlaybackMode(),
+      geminiCapBanner: getGeminiCapBanner() ?? undefined,
     },
     sim,
     pendingSituation,
+    decisions,
   };
 }

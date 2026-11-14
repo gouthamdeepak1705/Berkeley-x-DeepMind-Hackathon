@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ShieldCheck, X } from 'lucide-react';
 import { BuiltToolRecord, RefundRecord } from '../types/domain';
-import { injectSandboxCsp } from '../builder/builder';
+import { injectSandboxCsp } from '../builder/sandboxUtils';
 
 interface BuiltToolPanelProps {
   tool: BuiltToolRecord;

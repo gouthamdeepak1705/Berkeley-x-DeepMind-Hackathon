@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Check, ChevronDown, ChevronUp, Loader2, Wrench, X } from 'lucide-react';
+import { Check, ChevronDown, ChevronUp, Loader2, RotateCcw, ShieldCheck, Wrench, X } from 'lucide-react';
 import {
   BuilderRequirement,
   DayState,
   DismissReason,
   Fact,
+  RaisedItem,
   TextSegment,
 } from '../types/domain';
 import { formatShortDate } from '../engine/calendar';
@@ -23,6 +24,11 @@ export interface BuilderErrorState {
   failures: string[];
 }
 
+export interface DemoHighlightState {
+  actionKey: string;
+  label: string;
+}
+
 interface OwnerFeedProps {
   dayState: DayState;
   activeInvestigation?: ActiveInvestigationBanner | null;
@@ -31,6 +37,7 @@ interface OwnerFeedProps {
   pendingRequirements?: Record<string, BuilderRequirement>;
   builderProgressByCandidate?: Record<string, string>;
   builderErrorByCandidate?: Record<string, BuilderErrorState>;
+  demoHighlight?: DemoHighlightState | null;
   onInspectFact: (fact: Fact) => void;
   onApproveCard?: (candidateId: string) => void;
   onNotNowCard?: (candidateId: string) => void;
@@ -41,6 +48,8 @@ interface OwnerFeedProps {
   onCancelRequirement?: (candidateId: string) => void;
   onAskStoreManager?: (candidateId: string) => void;
   onOpenBuiltTool?: (toolId: string) => void;
+  onRespondAutonomy?: (offerId: string, reaction: 'enable_autonomy' | 'keep_asking') => void;
+  onUndoAction?: (decisionId: string) => void;
 }
 
 const DISMISS_REASONS: Array<{ value: DismissReason; label: string }> = [
@@ -50,13 +59,58 @@ const DISMISS_REASONS: Array<{ value: DismissReason; label: string }> = [
   { value: 'not_mine', label: 'Not mine' },
 ];
 
+export function toPlainOwnerWords(raw: string): string {
+  return raw
+    .replace(/\bdonor stores\b/gi, 'stores with stock to spare')
+    .replace(/\bDonor stores\b/g, 'Stores with stock to spare')
+    .replace(/\bdonor store\b/gi, 'store with stock to spare')
+    .replace(/\bdonor\b/gi, 'spare-stock')
+    .replace(/\bwks of cover\b/gi, 'weeks of stock left')
+    .replace(/\bweeks of cover\b/gi, 'weeks of stock left')
+    .replace(/\bwks\b/gi, 'weeks')
+    .replace(/\bLFL\b/g, 'comparable stores')
+    .replace(/\bTool to build:\s*/i, '');
+}
+
+function formatSecondsFromMs(ms: number): string {
+  const sec = Math.max(0.1, ms / 1000);
+  return `${sec.toFixed(1)} seconds`;
+}
+
 function renderSegments(segments: TextSegment[], onInspectFact: (fact: Fact) => void) {
   return segments.map((seg, idx) =>
     seg.type === 'text' ? (
-      <span key={`seg-t-${idx}`}>{seg.text}</span>
+      <span key={`seg-t-${idx}`}>{toPlainOwnerWords(seg.text)}</span>
     ) : (
       <FactValue key={`seg-f-${seg.fact.id}-${idx}`} fact={seg.fact} onInspect={onInspectFact} />
     ),
+  );
+}
+
+function describeProposedActionOneLine(item: RaisedItem): string {
+  const sc = item.secondCheck ?? item.investigation?.secondCheck;
+  if (sc?.status === 'disagreed') {
+    return 'Two checks disagreed — double-check these store figures first.';
+  }
+  const plan = item.transferPlan ?? item.investigation?.transferPlan;
+  if (plan) {
+    const dest =
+      plan.treatedStoreIds.length === 1
+        ? plan.transferLines[0]?.toStoreName ?? 'the short store'
+        : `${plan.treatedStoreIds.length} short stores`;
+    const holdoutSuffix = plan.holdoutStoreName
+      ? `, holding ${plan.holdoutStoreName} out to compare`
+      : '';
+    return `Move ${plan.totalUnitsFact.formatted} from stores with stock to spare to ${dest}${holdoutSuffix}.`;
+  }
+  if (item.investigation?.outcomeKind === 'tool_to_build') {
+    return 'Build a Walnut Creek refund review screen and turn on the $50 approval switch.';
+  }
+  if (item.isRollout) {
+    return 'Send the remaining Best-sellers stock to Santana Row.';
+  }
+  return toPlainOwnerWords(
+    item.investigation?.outcomeDetail ?? 'Review this issue and decide the next step.',
   );
 }
 
@@ -68,6 +122,7 @@ export function OwnerFeed({
   pendingRequirements = {},
   builderProgressByCandidate = {},
   builderErrorByCandidate = {},
+  demoHighlight = null,
   onInspectFact,
   onApproveCard,
   onNotNowCard,
@@ -78,25 +133,32 @@ export function OwnerFeed({
   onCancelRequirement,
   onAskStoreManager,
   onOpenBuiltTool,
+  onRespondAutonomy,
+  onUndoAction,
 }: OwnerFeedProps) {
   const [letGoExpanded, setLetGoExpanded] = useState(false);
   const [openEvidenceIds, setOpenEvidenceIds] = useState<Record<string, boolean>>({});
   const [openLetGoGroupIds, setOpenLetGoGroupIds] = useState<Record<string, boolean>>({});
-  const [collapsedCardIds, setCollapsedCardIds] = useState<Record<string, boolean>>({});
+  const [openWhyIds, setOpenWhyIds] = useState<Record<string, boolean>>({});
   const [dismissPickerId, setDismissPickerId] = useState<string | null>(null);
 
   const letGoCountFact = createFact(
     `feed:let_go_count:${dayState.date}`,
-    'Candidates noticed and let go',
+    'Items noticed and let go',
     dayState.noticedAndLetGo.length,
     'count',
-    'Detector candidates explained by silence checks or let go by Gemini Decision through this date.',
+    'Unusual patterns checked against the calendar, store mix, and safety rules and safely let go through this date.',
   );
 
   const groupedLetGo = dayState.groupedLetGo;
   const visibleLetGo = letGoExpanded ? groupedLetGo : groupedLetGo.slice(0, 5);
   const inProgress = dayState.inProgress ?? [];
   const doneForYou = dayState.doneForYou ?? [];
+  const pendingAutonomyOffer =
+    dayState.autonomyRecord?.offerCard?.status === 'pending'
+      ? dayState.autonomyRecord.offerCard
+      : null;
+  const needsYouCount = dayState.raised.length + (pendingAutonomyOffer ? 1 : 0);
 
   const toggleEvidence = (id: string) => {
     setOpenEvidenceIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -106,9 +168,14 @@ export function OwnerFeed({
     setOpenLetGoGroupIds((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const toggleCard = (id: string) => {
-    setCollapsedCardIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleWhy = (id: string) => {
+    setOpenWhyIds((prev) => ({ ...prev, [id]: !prev[id] }));
   };
+
+  const highlightRing = (key: string) =>
+    demoHighlight?.actionKey === key
+      ? 'ring-2 ring-offset-2 ring-[#312E81] shadow-md'
+      : '';
 
   return (
     <div className="mt-6 space-y-6">
@@ -118,9 +185,9 @@ export function OwnerFeed({
           <h2 id="section-needs-you" className="text-sm font-semibold text-[#171717]">
             Needs you
           </h2>
-          {dayState.raised.length > 0 && (
+          {needsYouCount > 0 && (
             <span className="text-xs font-mono tabular-nums text-[#B45309] font-medium">
-              {dayState.raised.length} open
+              {needsYouCount} waiting
             </span>
           )}
         </div>
@@ -139,20 +206,67 @@ export function OwnerFeed({
             {activeInvestigation.steps.length > 0 && (
               <ul className="space-y-1 pl-6 text-xs text-[#57534E] list-disc">
                 {activeInvestigation.steps.map((s, idx) => (
-                  <li key={`step-${idx}`}>{s}</li>
+                  <li key={`step-${idx}`}>{toPlainOwnerWords(s)}</li>
                 ))}
               </ul>
             )}
           </div>
         )}
 
-        {dayState.raised.length === 0 && !activeInvestigation ? (
+        {/* Indigo Offer Card: Earn the right to act alone (Part A) */}
+        {pendingAutonomyOffer && (
+          <div
+            data-testid="autonomy-offer-card"
+            className="mt-2 bg-[#EEF2FF] border-2 border-[#312E81] rounded-xl p-4 space-y-3"
+          >
+            <div className="flex items-baseline justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-sm font-semibold text-[#312E81]">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>{pendingAutonomyOffer.headline}</span>
+              </div>
+              <span className="text-xs font-mono text-[#4338CA] shrink-0">
+                {formatShortDate(pendingAutonomyOffer.offeredOn)}
+              </span>
+            </div>
+
+            <p className="text-sm text-[#1E1B4B] leading-relaxed">{pendingAutonomyOffer.body}</p>
+
+            {demoHighlight?.actionKey === 'autonomy_yes' && (
+              <p className="text-[11px] font-medium text-[#312E81] bg-white/80 px-2.5 py-1 rounded border border-[#C7D2FE]">
+                the demo is choosing for you
+              </p>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isRequestInFlight}
+                onClick={() => onRespondAutonomy?.(pendingAutonomyOffer.id, 'enable_autonomy')}
+                className={`px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer ${highlightRing(
+                  'autonomy_yes',
+                )}`}
+              >
+                Yes, within those limits
+              </button>
+              <button
+                type="button"
+                disabled={isRequestInFlight}
+                onClick={() => onRespondAutonomy?.(pendingAutonomyOffer.id, 'keep_asking')}
+                className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#C7D2FE] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+              >
+                Keep asking me
+              </button>
+            </div>
+          </div>
+        )}
+
+        {dayState.raised.length === 0 && !activeInvestigation && !pendingAutonomyOffer ? (
           <p className="mt-2 text-sm text-[#57534E]">Nothing needs you today.</p>
         ) : dayState.raised.length > 0 ? (
           <div className="mt-2 bg-white border border-[#E6E1D8] rounded-xl divide-y divide-[#E6E1D8]">
             {dayState.raised.map((item) => {
               const evOpen = !!openEvidenceIds[item.candidateId];
-              const isCardOpen = !collapsedCardIds[item.candidateId];
+              const whyOpen = !!openWhyIds[item.candidateId];
               const isBusy = actionBusyId === item.candidateId;
               const buttonsDisabled = isBusy || isRequestInFlight;
               const isDismissOpen = dismissPickerId === item.candidateId;
@@ -177,124 +291,364 @@ export function OwnerFeed({
               const doneManagerAct = (dayState.doneForYou ?? []).find(
                 (d) => d.candidateId === item.candidateId,
               );
+              const stakeFact = item.todayStakePerWeek ?? item.stakePerWeek;
+              const approveBtnKey = `approve:${item.candidateId}`;
+              const buildBtnKey = `build:${item.candidateId}`;
+              const buildItBtnKey = `build_it:${item.candidateId}`;
 
               return (
-                <div key={item.candidateId} className="p-4" data-card-id={item.candidateId}>
+                <div key={item.candidateId} className="p-4 space-y-2.5" data-card-id={item.candidateId}>
+                  {/* 1. Title + date */}
                   <div className="flex items-baseline justify-between gap-3">
-                    <button
-                      type="button"
-                      onClick={() => toggleCard(item.candidateId)}
-                      aria-expanded={isCardOpen}
-                      className="text-left flex items-baseline gap-1.5 text-sm font-semibold text-[#B45309] hover:underline cursor-pointer"
-                    >
-                      <span>{item.title}</span>
-                      {isCardOpen ? (
-                        <ChevronUp className="w-3.5 h-3.5 shrink-0 translate-y-0.5" />
-                      ) : (
-                        <ChevronDown className="w-3.5 h-3.5 shrink-0 translate-y-0.5" />
-                      )}
-                    </button>
+                    <h3 className="text-sm font-semibold text-[#B45309]">{item.title}</h3>
                     <span className="text-xs font-mono text-[#78716C] shrink-0">
                       {formatShortDate(item.firstDetectedOn)}
                     </span>
                   </div>
 
-                  {/* Re-raised notice & cost of delay so far */}
+                  {/* Brief re-raised notice when deferred previously */}
                   {item.reRaisedOn && (
-                    <div className="mt-2 p-2.5 rounded-lg bg-[#FFFBEB] border border-[#FDE68A] text-xs space-y-1">
+                    <div className="p-2.5 rounded-lg bg-[#FFFBEB] border border-[#FDE68A] text-xs space-y-1">
                       <p className="text-[#92400E] font-medium">
-                        First raised {formatShortDate(item.firstDetectedOn)} · Deferred{' '}
-                        {item.deferredOn ? formatShortDate(item.deferredOn) : ''} · Re-raised{' '}
+                        Put aside earlier ({item.deferredOn ? formatShortDate(item.deferredOn) : ''}) · Back{' '}
                         {formatShortDate(item.reRaisedOn)} ({item.reRaiseReason})
                       </p>
                       {item.costOfDelayFact && (
                         <p className="text-[#171717]">
-                          Cost of delay so far:{' '}
+                          Cost of waiting so far:{' '}
                           <FactValue fact={item.costOfDelayFact} onInspect={onInspectFact} />
                         </p>
                       )}
                     </div>
                   )}
 
-                  {/* Rollout summary or Investigation Finding */}
+                  {/* 2. One plain sentence */}
                   {item.isRollout ? (
-                    <p className="mt-2 text-sm text-[#171717] leading-relaxed">{item.summary}</p>
+                    <p className="text-sm text-[#171717] leading-relaxed">
+                      {toPlainOwnerWords(item.summary)}
+                    </p>
                   ) : inv ? (
-                    <p className="mt-2 text-sm text-[#171717] leading-relaxed">
+                    <p className="text-sm text-[#171717] leading-relaxed">
                       {renderSegments(inv.findingSegments, onInspectFact)}
                     </p>
-                  ) : null}
+                  ) : (
+                    <p className="text-sm text-[#171717] leading-relaxed">
+                      {toPlainOwnerWords(item.summary)}
+                    </p>
+                  )}
 
-                  {/* Expected and actual side by side */}
-                  <div className="mt-2.5 grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-[#FAF8F5] border border-[#F3F0EA] text-xs">
-                    <div>
-                      <p className="text-[11px] text-[#78716C]">Expected</p>
-                      <p className="mt-0.5 font-medium text-[#171717]">
-                        <FactValue fact={item.expected} onInspect={onInspectFact} />
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] text-[#78716C]">
-                        Actual ({formatShortDate(item.firstDetectedOn)})
-                      </p>
-                      <p className="mt-0.5 font-medium text-[#171717]">
-                        <FactValue fact={item.actual} onInspect={onInspectFact} />
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] text-[#78716C]">At stake / wk</p>
-                      <p className="mt-0.5 font-medium text-[#171717]">
-                        <FactValue fact={item.stakePerWeek} onInspect={onInspectFact} />
-                      </p>
-                    </div>
-                  </div>
+                  {/* 3. Money at stake per week */}
+                  <p className="text-xs text-[#57534E]">
+                    At stake per week:{' '}
+                    <FactValue
+                      fact={stakeFact}
+                      onInspect={onInspectFact}
+                      className="font-semibold text-[#171717]"
+                    />
+                  </p>
 
-                  {/* Separate Today figures when still open on a later day */}
-                  {hasToday && (
-                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-xs text-[#171717]">
-                      <span className="font-medium text-[#57534E]">
-                        Today ({formatShortDate(item.todayDate!)}):
-                      </span>
-                      <span>
-                        Actual: <FactValue fact={item.todayActual!} onInspect={onInspectFact} />
-                      </span>
-                      <span>
-                        Expected:{' '}
-                        <FactValue fact={item.todayExpected!} onInspect={onInspectFact} />
-                      </span>
-                      <span>
-                        At stake / wk:{' '}
-                        <FactValue fact={item.todayStakePerWeek!} onInspect={onInspectFact} />
-                      </span>
+                  {/* 4. Proposed action in one line */}
+                  <p className="text-xs font-medium text-[#312E81] bg-[#F5F7FF] border border-[#E0E7FF] rounded-lg px-3 py-2">
+                    {describeProposedActionOneLine(item)}
+                  </p>
+
+                  {/* Builder Requirement sheet & progress when Build was clicked */}
+                  {isToolToBuild && pendingReq && (
+                    <div
+                      data-testid="builder-requirement-panel"
+                      className="mt-2 p-3.5 rounded-lg bg-[#F5F7FF] border border-[#C7D2FE] text-xs space-y-2"
+                    >
+                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                        <span className="font-semibold text-[#312E81]">
+                          Plan for tool: {pendingReq.title}
+                        </span>
+                        <span className="font-mono text-[11px] text-[#57534E]">
+                          {pendingReq.model} · {formatSecondsFromMs(pendingReq.latencyMs)}
+                          {pendingReq.mode === 'replayed' ? ' (replayed)' : ''}
+                          {pendingReq.usedFallbackWording ? ' · Fallback copy' : ''}
+                        </span>
+                      </div>
+                      <dl className="space-y-1.5 text-[#171717]">
+                        <div>
+                          <dt className="font-semibold text-[#57534E]">Purpose</dt>
+                          <dd className="leading-relaxed">
+                            {renderSegments(pendingReq.purpose, onInspectFact)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="font-semibold text-[#57534E]">Who uses it</dt>
+                          <dd className="leading-relaxed">
+                            {renderSegments(pendingReq.users, onInspectFact)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="font-semibold text-[#57534E]">What it shows</dt>
+                          <dd className="leading-relaxed">
+                            {renderSegments(pendingReq.shows, onInspectFact)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="font-semibold text-[#57534E]">Actions inside tool</dt>
+                          <dd className="leading-relaxed">
+                            {renderSegments(pendingReq.actions, onInspectFact)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="font-semibold text-[#57534E]">Checks before handover</dt>
+                          <dd className="leading-relaxed">
+                            {renderSegments(pendingReq.verification, onInspectFact)}
+                          </dd>
+                        </div>
+                      </dl>
+
+                      {buildProgress && (
+                        <div className="flex items-center gap-2 p-2 rounded bg-white border border-[#C7D2FE] text-[#312E81] font-medium">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          <span>{buildProgress}</span>
+                        </div>
+                      )}
+
+                      {buildErr && (
+                        <div
+                          role="alert"
+                          className="p-2.5 rounded bg-[#FEF2F2] border border-[#FECACA] text-[#991B1B] space-y-1"
+                        >
+                          <p className="font-semibold">{buildErr.message}</p>
+                          <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
+                            {buildErr.failures.map((f, i) => (
+                              <li key={`bfail-${i}`}>{f}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {demoHighlight?.actionKey === buildItBtnKey && (
+                        <p className="text-[11px] font-medium text-[#312E81] bg-white/80 px-2.5 py-1 rounded border border-[#C7D2FE]">
+                          the demo is choosing for you
+                        </p>
+                      )}
+
+                      <div className="pt-1 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={buttonsDisabled}
+                          onClick={() => onConfirmBuildTool?.(item.candidateId)}
+                          className={`px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer ${highlightRing(
+                            buildItBtnKey,
+                          )}`}
+                        >
+                          {buildProgress ? 'Building & testing...' : 'Build it'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={buttonsDisabled}
+                          onClick={() => onCancelRequirement?.(item.candidateId)}
+                          className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                        >
+                          Not now
+                        </button>
+                      </div>
                     </div>
                   )}
 
-                  {/* Second Check status pill (plain text status row) */}
-                  {sc && (
-                    <div
-                      className={`mt-2 px-2.5 py-1.5 rounded-lg border text-xs flex flex-wrap items-center justify-between gap-2 ${
-                        sc.status === 'matched'
-                          ? 'bg-[#ECFDF5] border-[#BBF7D0] text-[#15803D]'
-                          : sc.status === 'disagreed'
-                            ? 'bg-[#FEF2F2] border-[#FECACA] text-[#991B1B]'
-                            : 'bg-[#FAF8F5] border-[#E6E1D8] text-[#57534E]'
-                      }`}
-                    >
-                      <span className="font-medium">{sc.label}</span>
-                      {sc.secondValueFact && (
-                        <span className="font-mono text-[11px]">
-                          Code: <FactValue fact={sc.firstValueFact} onInspect={onInspectFact} /> ·
-                          Python: <FactValue fact={sc.secondValueFact} onInspect={onInspectFact} />
-                        </span>
+                  {/* Demo helper label if scripted button is highlighted */}
+                  {demoHighlight &&
+                    (demoHighlight.actionKey === approveBtnKey ||
+                      demoHighlight.actionKey === buildBtnKey) && (
+                      <p className="text-[11px] font-medium text-[#312E81] bg-[#EEF2FF] px-2.5 py-1 rounded border border-[#C7D2FE]">
+                        the demo is choosing for you
+                      </p>
+                    )}
+
+                  {/* 5. Action Buttons + See why link */}
+                  {!(isToolToBuild && pendingReq) && (
+                    <div className="pt-1 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {checksDisagree ? (
+                            <button
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() => onLookAgainCard?.(item.candidateId)}
+                              className="px-3.5 py-1.5 bg-[#B45309] hover:bg-[#92400E] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                            >
+                              {isBusy ? 'Rechecking...' : 'Look again'}
+                            </button>
+                          ) : isToolToBuild ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={buttonsDisabled}
+                                onClick={() => onStartBuildRequirement?.(item.candidateId)}
+                                className={`px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer ${highlightRing(
+                                  buildBtnKey,
+                                )}`}
+                              >
+                                {isBusy ? 'Preparing...' : 'Build'}
+                              </button>
+
+                              {askedManagerAct ? (
+                                <span className="px-2.5 py-1.5 bg-[#FAF8F5] border border-[#E6E1D8] text-[#57534E] text-[11px] font-medium rounded-lg">
+                                  Asked store manager · due {formatShortDate(askedManagerAct.endDate)}{' '}
+                                  (simulated)
+                                </span>
+                              ) : doneManagerAct ? (
+                                <span className="px-2.5 py-1.5 bg-[#FAF8F5] border border-[#E6E1D8] text-[#57534E] text-[11px] font-medium rounded-lg">
+                                  Store manager check finished
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={buttonsDisabled}
+                                  onClick={() => onAskStoreManager?.(item.candidateId)}
+                                  className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                                >
+                                  Ask store manager
+                                </button>
+                              )}
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() => onApproveCard?.(item.candidateId)}
+                              className={`px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer ${highlightRing(
+                                approveBtnKey,
+                              )}`}
+                            >
+                              {isBusy ? 'Working...' : 'Approve'}
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            disabled={buttonsDisabled}
+                            onClick={() => onNotNowCard?.(item.candidateId)}
+                            className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                          >
+                            Not now
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={buttonsDisabled}
+                            onClick={() =>
+                              setDismissPickerId(isDismissOpen ? null : item.candidateId)
+                            }
+                            className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#57534E] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleWhy(item.candidateId)}
+                          aria-expanded={whyOpen}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-[#312E81] hover:underline shrink-0 cursor-pointer"
+                        >
+                          <span>{whyOpen ? 'Hide why' : 'See why'}</span>
+                          {whyOpen ? (
+                            <ChevronUp className="w-3.5 h-3.5" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+
+                      {isDismissOpen && (
+                        <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-[#E6E1D8] flex flex-wrap items-center gap-1.5">
+                          <span className="text-[11px] text-[#57534E] mr-1">Why?</span>
+                          {DISMISS_REASONS.map((r) => (
+                            <button
+                              key={r.value}
+                              type="button"
+                              disabled={buttonsDisabled}
+                              onClick={() => {
+                                setDismissPickerId(null);
+                                onDismissCard?.(item.candidateId, r.value);
+                              }}
+                              className="px-2 py-1 text-[11px] font-medium bg-white hover:bg-[#F3F0EA] disabled:opacity-50 border border-[#E6E1D8] rounded text-[#171717] cursor-pointer"
+                            >
+                              {r.label}
+                            </button>
+                          ))}
+                        </div>
                       )}
                     </div>
                   )}
 
-                  {isCardOpen && (
-                    <>
-                      {/* Per-store breakdown for multi-store stock situations */}
+                  {/* "See why" expandable section */}
+                  {whyOpen && (
+                    <div className="mt-3 pt-3 border-t border-[#E6E1D8] space-y-3">
+                      {/* Expected and actual side by side */}
+                      <div className="grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-[#FAF8F5] border border-[#F3F0EA] text-xs">
+                        <div>
+                          <p className="text-[11px] text-[#78716C]">Expected</p>
+                          <p className="mt-0.5 font-medium text-[#171717]">
+                            <FactValue fact={item.expected} onInspect={onInspectFact} />
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-[#78716C]">
+                            Actual ({formatShortDate(item.firstDetectedOn)})
+                          </p>
+                          <p className="mt-0.5 font-medium text-[#171717]">
+                            <FactValue fact={item.actual} onInspect={onInspectFact} />
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] text-[#78716C]">At stake / week</p>
+                          <p className="mt-0.5 font-medium text-[#171717]">
+                            <FactValue fact={item.stakePerWeek} onInspect={onInspectFact} />
+                          </p>
+                        </div>
+                      </div>
+
+                      {hasToday && (
+                        <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-xs text-[#171717]">
+                          <span className="font-medium text-[#57534E]">
+                            Today ({formatShortDate(item.todayDate!)}):
+                          </span>
+                          <span>
+                            Actual: <FactValue fact={item.todayActual!} onInspect={onInspectFact} />
+                          </span>
+                          <span>
+                            Expected:{' '}
+                            <FactValue fact={item.todayExpected!} onInspect={onInspectFact} />
+                          </span>
+                          <span>
+                            At stake / week:{' '}
+                            <FactValue fact={item.todayStakePerWeek!} onInspect={onInspectFact} />
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Two-way check */}
+                      {sc && (
+                        <div
+                          className={`px-2.5 py-1.5 rounded-lg border text-xs flex flex-wrap items-center justify-between gap-2 ${
+                            sc.status === 'matched'
+                              ? 'bg-[#ECFDF5] border-[#BBF7D0] text-[#15803D]'
+                              : sc.status === 'disagreed'
+                                ? 'bg-[#FEF2F2] border-[#FECACA] text-[#991B1B]'
+                                : 'bg-[#FAF8F5] border-[#E6E1D8] text-[#57534E]'
+                          }`}
+                        >
+                          <span className="font-medium">{sc.label}</span>
+                          {sc.secondValueFact && (
+                            <span className="font-mono text-[11px]">
+                              Main check: <FactValue fact={sc.firstValueFact} onInspect={onInspectFact} /> ·
+                              Second check:{' '}
+                              <FactValue fact={sc.secondValueFact} onInspect={onInspectFact} />
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Per-store breakdown */}
                       {multiStore && item.stores && (
-                        <ul className="mt-2.5 pt-2 border-t border-[#F3F0EA] space-y-1 text-xs text-[#57534E]">
+                        <ul className="space-y-1 text-xs text-[#57534E]">
                           {item.stores.map((st) => (
                             <li
                               key={st.storeId}
@@ -316,10 +670,9 @@ export function OwnerFeed({
                         </ul>
                       )}
 
-                      {/* Investigation details: Ruled out, Cause, Options, Outcome (single paragraph) */}
+                      {/* Investigation details */}
                       {inv && !item.isRollout && (
-                        <div className="mt-3 pt-3 border-t border-[#F3F0EA] space-y-3 text-xs">
-                          {/* Ruled out */}
+                        <div className="space-y-3 text-xs">
                           <div>
                             <p className="font-semibold text-[#57534E]">Ruled out</p>
                             <ul className="mt-1.5 space-y-1.5">
@@ -329,14 +682,13 @@ export function OwnerFeed({
                                   <span>
                                     {ro.summarySegments && ro.summarySegments.length > 0
                                       ? renderSegments(ro.summarySegments, onInspectFact)
-                                      : ro.summary}
+                                      : toPlainOwnerWords(ro.summary)}
                                   </span>
                                 </li>
                               ))}
                             </ul>
                           </div>
 
-                          {/* Cause */}
                           <div>
                             <p className="font-semibold text-[#57534E]">Cause</p>
                             <p className="mt-1 text-[#171717] leading-relaxed">
@@ -344,7 +696,6 @@ export function OwnerFeed({
                             </p>
                           </div>
 
-                          {/* Options */}
                           <div>
                             <p className="font-semibold text-[#57534E]">Options</p>
                             <ul className="mt-1.5 space-y-1.5">
@@ -354,26 +705,29 @@ export function OwnerFeed({
                                   className="p-2 rounded-lg bg-[#FAF8F5] border border-[#E6E1D8]"
                                 >
                                   <div className="flex items-baseline justify-between gap-2">
-                                    <span className="font-medium text-[#171717]">{opt.label}</span>
+                                    <span className="font-medium text-[#171717]">
+                                      {toPlainOwnerWords(opt.label)}
+                                    </span>
                                     {opt.weeklyEffectFact && (
                                       <span className="font-mono text-[11px] shrink-0">
                                         <FactValue
                                           fact={opt.weeklyEffectFact}
                                           onInspect={onInspectFact}
                                         />
-                                        /wk
+                                        /week
                                       </span>
                                     )}
                                   </div>
-                                  <p className="mt-0.5 text-[#57534E]">{opt.description}</p>
+                                  <p className="mt-0.5 text-[#57534E]">
+                                    {toPlainOwnerWords(opt.description)}
+                                  </p>
                                 </li>
                               ))}
                             </ul>
                           </div>
 
-                          {/* Outcome (one paragraph only) */}
                           <div>
-                            <p className="font-semibold text-[#57534E]">Outcome</p>
+                            <p className="font-semibold text-[#57534E]">Recommendation</p>
                             <p className="mt-1 text-[#171717] leading-relaxed">
                               {renderSegments(inv.proposalSegments, onInspectFact)}
                             </p>
@@ -381,13 +735,13 @@ export function OwnerFeed({
                         </div>
                       )}
 
-                      {/* Exact Transfer Plan preview & Gateway limits */}
+                      {/* Exact Transfer Plan preview */}
                       {plan && (
-                        <div className="mt-3 p-3 rounded-lg bg-[#F5F7FF] border border-[#C7D2FE] text-xs space-y-1.5">
+                        <div className="p-3 rounded-lg bg-[#F5F7FF] border border-[#C7D2FE] text-xs space-y-1.5">
                           <div className="flex items-baseline justify-between gap-2">
                             <span className="font-semibold text-[#312E81]">
-                              Planned action ({plan.transferLines.length} transfer
-                              {plan.transferLines.length === 1 ? '' : 's'})
+                              Plan ({plan.transferLines.length}{' '}
+                              {plan.transferLines.length === 1 ? 'transfer' : 'transfers'})
                             </span>
                             <span className="font-mono text-[11px] text-[#312E81]">
                               Arrives {formatShortDate(plan.arrivalDate)}
@@ -397,7 +751,7 @@ export function OwnerFeed({
                             Move <FactValue fact={plan.totalUnitsFact} onInspect={onInspectFact} />{' '}
                             (worth{' '}
                             <FactValue fact={plan.weeklyRecoveryFact} onInspect={onInspectFact} />
-                            /wk):
+                            /week):
                           </p>
                           <ul className="space-y-0.5 text-[#57534E]">
                             {plan.transferLines.map((l, idx) => (
@@ -412,7 +766,7 @@ export function OwnerFeed({
                           {plan.holdoutSentence && (
                             <p className="text-[#312E81] font-medium">{plan.holdoutSentence}</p>
                           )}
-                          <p className="text-[#57534E]">{plan.limitSentence}</p>
+                          <p className="text-[#57534E]">{toPlainOwnerWords(plan.limitSentence)}</p>
                           {plan.shortfallUnitsFact && (
                             <p className="text-[#B45309] font-medium">
                               Shortfall:{' '}
@@ -420,7 +774,7 @@ export function OwnerFeed({
                                 fact={plan.shortfallUnitsFact}
                                 onInspect={onInspectFact}
                               />{' '}
-                              cannot be covered above donor limits.
+                              cannot be covered above spare-stock store limits.
                             </p>
                           )}
                           <p className="text-[11px] text-[#57534E] pt-1 border-t border-[#E0E7FF]">
@@ -429,212 +783,9 @@ export function OwnerFeed({
                         </div>
                       )}
 
-                      {/* Raised by instinct provenance line (with original latency + replayed) */}
-                      {item.instinctMeta && (
-                        <p className="mt-3 pt-2 border-t border-[#F3F0EA] text-[11px] font-mono text-[#78716C]">
-                          Raised by instinct, confidence{' '}
-                          {item.instinctMeta.confidence.toFixed(2)}, decided in{' '}
-                          {item.instinctMeta.latencyMs} ms
-                          {item.instinctMeta.mode === 'replayed' ? ' (replayed)' : ''} · urgency:{' '}
-                          {item.instinctMeta.urgencyLevel}
-                          {inv
-                            ? ` · checked by ${inv.model} (${inv.mode}, ${inv.latencyMs} ms${inv.mode === 'replayed' ? ' replayed' : ''})`
-                            : ''}
-                        </p>
-                      )}
-
-                      {/* Builder Requirement & Progress / Failure panel (Stage 4) */}
-                      {isToolToBuild && pendingReq && (
-                        <div
-                          data-testid="builder-requirement-panel"
-                          className="mt-3 p-3.5 rounded-lg bg-[#F5F7FF] border border-[#C7D2FE] text-xs space-y-2"
-                        >
-                          <div className="flex flex-wrap items-baseline justify-between gap-2">
-                            <span className="font-semibold text-[#312E81]">
-                              Requirement: {pendingReq.title}
-                            </span>
-                            <span className="font-mono text-[11px] text-[#57534E]">
-                              {pendingReq.model} ({pendingReq.mode}, {pendingReq.latencyMs} ms
-                              {pendingReq.mode === 'replayed' ? ' replayed' : ''})
-                              {pendingReq.usedFallbackWording ? ' · Fallback copy' : ''}
-                            </span>
-                          </div>
-                          <dl className="space-y-1.5 text-[#171717]">
-                            <div>
-                              <dt className="font-semibold text-[#57534E]">Purpose</dt>
-                              <dd className="leading-relaxed">
-                                {renderSegments(pendingReq.purpose, onInspectFact)}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="font-semibold text-[#57534E]">Who uses it</dt>
-                              <dd className="leading-relaxed">
-                                {renderSegments(pendingReq.users, onInspectFact)}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="font-semibold text-[#57534E]">What it shows</dt>
-                              <dd className="leading-relaxed">
-                                {renderSegments(pendingReq.shows, onInspectFact)}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="font-semibold text-[#57534E]">Actions inside tool</dt>
-                              <dd className="leading-relaxed">
-                                {renderSegments(pendingReq.actions, onInspectFact)}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt className="font-semibold text-[#57534E]">Checks before handover</dt>
-                              <dd className="leading-relaxed">
-                                {renderSegments(pendingReq.verification, onInspectFact)}
-                              </dd>
-                            </div>
-                          </dl>
-
-                          {buildProgress && (
-                            <div className="flex items-center gap-2 p-2 rounded bg-white border border-[#C7D2FE] text-[#312E81] font-medium">
-                              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                              <span>{buildProgress}</span>
-                            </div>
-                          )}
-
-                          {buildErr && (
-                            <div
-                              role="alert"
-                              className="p-2.5 rounded bg-[#FEF2F2] border border-[#FECACA] text-[#991B1B] space-y-1"
-                            >
-                              <p className="font-semibold">{buildErr.message}</p>
-                              <ul className="list-disc pl-4 space-y-0.5 text-[11px]">
-                                {buildErr.failures.map((f, i) => (
-                                  <li key={`bfail-${i}`}>{f}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          <div className="pt-1 flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              disabled={buttonsDisabled}
-                              onClick={() => onConfirmBuildTool?.(item.candidateId)}
-                              className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                            >
-                              {buildProgress ? 'Building & testing...' : 'Build it'}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={buttonsDisabled}
-                              onClick={() => onCancelRequirement?.(item.candidateId)}
-                              className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                            >
-                              Not now
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Action Buttons */}
-                      {!(isToolToBuild && pendingReq) && (
-                        <div className="mt-3 pt-3 border-t border-[#F3F0EA] space-y-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            {checksDisagree ? (
-                              <button
-                                type="button"
-                                disabled={buttonsDisabled}
-                                onClick={() => onLookAgainCard?.(item.candidateId)}
-                                className="px-3.5 py-1.5 bg-[#B45309] hover:bg-[#92400E] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                              >
-                                {isBusy ? 'Rechecking...' : 'Look again'}
-                              </button>
-                            ) : isToolToBuild ? (
-                              <>
-                                <button
-                                  type="button"
-                                  disabled={buttonsDisabled}
-                                  onClick={() => onStartBuildRequirement?.(item.candidateId)}
-                                  className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                                >
-                                  {isBusy ? 'Drafting requirement...' : 'Build'}
-                                </button>
-
-                                {askedManagerAct ? (
-                                  <span className="px-2.5 py-1.5 bg-[#FAF8F5] border border-[#E6E1D8] text-[#57534E] text-[11px] font-medium rounded-lg">
-                                    Asked store manager · due {formatShortDate(askedManagerAct.endDate)}{' '}
-                                    (simulated)
-                                  </span>
-                                ) : doneManagerAct ? (
-                                  <span className="px-2.5 py-1.5 bg-[#FAF8F5] border border-[#E6E1D8] text-[#57534E] text-[11px] font-medium rounded-lg">
-                                    Store manager follow-up closed
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    disabled={buttonsDisabled}
-                                    onClick={() => onAskStoreManager?.(item.candidateId)}
-                                    className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                                  >
-                                    Ask store manager
-                                  </button>
-                                )}
-                              </>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled={buttonsDisabled}
-                                onClick={() => onApproveCard?.(item.candidateId)}
-                                className="px-3.5 py-1.5 bg-[#312E81] hover:bg-[#26236B] disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
-                              >
-                                {isBusy ? 'Working...' : 'Approve'}
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              disabled={buttonsDisabled}
-                              onClick={() => onNotNowCard?.(item.candidateId)}
-                              className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#171717] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                            >
-                              Not now
-                            </button>
-
-                            <button
-                              type="button"
-                              disabled={buttonsDisabled}
-                              onClick={() =>
-                                setDismissPickerId(isDismissOpen ? null : item.candidateId)
-                              }
-                              className="px-3 py-1.5 bg-white hover:bg-[#F3F0EA] disabled:opacity-50 text-[#57534E] border border-[#E6E1D8] text-xs font-medium rounded-lg transition-colors cursor-pointer"
-                            >
-                              Dismiss
-                            </button>
-                          </div>
-
-                          {isDismissOpen && (
-                            <div className="p-2.5 rounded-lg bg-[#FAF8F5] border border-[#E6E1D8] flex flex-wrap items-center gap-1.5">
-                              <span className="text-[11px] text-[#57534E] mr-1">Why?</span>
-                              {DISMISS_REASONS.map((r) => (
-                                <button
-                                  key={r.value}
-                                  type="button"
-                                  disabled={buttonsDisabled}
-                                  onClick={() => {
-                                    setDismissPickerId(null);
-                                    onDismissCard?.(item.candidateId, r.value);
-                                  }}
-                                  className="px-2 py-1 text-[11px] font-medium bg-white hover:bg-[#F3F0EA] disabled:opacity-50 border border-[#E6E1D8] rounded text-[#171717] cursor-pointer"
-                                >
-                                  {r.label}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Linked supporting evidence */}
+                      {/* Supporting evidence */}
                       {evidenceList.length > 0 && (
-                        <div className="mt-2.5 pt-2 border-t border-[#F3F0EA]">
+                        <div>
                           <button
                             type="button"
                             onClick={() => toggleEvidence(item.candidateId)}
@@ -643,8 +794,8 @@ export function OwnerFeed({
                           >
                             <span>
                               {evOpen
-                                ? `Hide supporting evidence (${evidenceList.length})`
-                                : `Supporting evidence (${evidenceList.length})`}
+                                ? `Hide related signs (${evidenceList.length})`
+                                : `Related signs (${evidenceList.length})`}
                             </span>
                             {evOpen ? (
                               <ChevronUp className="w-3.5 h-3.5" />
@@ -667,11 +818,11 @@ export function OwnerFeed({
                                     {ev.candidateId.startsWith('chain_total_note:') ? (
                                       <>
                                         <span>
-                                          Total 28d YoY:{' '}
+                                          All stores 28-day vs last year:{' '}
                                           <FactValue fact={ev.actual} onInspect={onInspectFact} />
                                         </span>
                                         <span>
-                                          LFL 28d vs exp:{' '}
+                                          Comparable stores vs expected:{' '}
                                           <FactValue fact={ev.expected} onInspect={onInspectFact} />
                                         </span>
                                       </>
@@ -685,20 +836,6 @@ export function OwnerFeed({
                                           Expected:{' '}
                                           <FactValue fact={ev.expected} onInspect={onInspectFact} />
                                         </span>
-                                        {ev.todayActual && ev.todayExpected && (
-                                          <span className="text-[#171717]">
-                                            Today:{' '}
-                                            <FactValue
-                                              fact={ev.todayActual}
-                                              onInspect={onInspectFact}
-                                            />{' '}
-                                            vs{' '}
-                                            <FactValue
-                                              fact={ev.todayExpected}
-                                              onInspect={onInspectFact}
-                                            />
-                                          </span>
-                                        )}
                                       </>
                                     )}
                                   </div>
@@ -708,7 +845,23 @@ export function OwnerFeed({
                           )}
                         </div>
                       )}
-                    </>
+
+                      {/* Plain-words model details */}
+                      {item.instinctMeta && (
+                        <p className="pt-2 border-t border-[#F3F0EA] text-[11px] text-[#78716C]">
+                          {Math.round(item.instinctMeta.confidence * 100)}% sure · decided in{' '}
+                          {formatSecondsFromMs(item.instinctMeta.latencyMs)}
+                          {item.instinctMeta.mode === 'replayed' ? ' (replayed)' : ''}
+                          {inv
+                            ? ` · checked in ${formatSecondsFromMs(inv.latencyMs)} using ${
+                                inv.jobKey === 'investigate_routine'
+                                  ? 'routine kind, fast model'
+                                  : inv.model
+                              }`
+                            : ''}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               );
@@ -717,7 +870,7 @@ export function OwnerFeed({
         ) : null}
       </section>
 
-      {/* 2. In progress (Stage 3: running approved actions before proof closes) */}
+      {/* 2. In progress */}
       <section aria-labelledby="section-in-progress" className="pt-5 border-t border-[#E6E1D8]">
         <div className="flex items-baseline justify-between">
           <h2 id="section-in-progress" className="text-sm font-semibold text-[#171717]">
@@ -749,7 +902,7 @@ export function OwnerFeed({
                     Ends {formatShortDate(act.endDate)}
                   </span>
                 </div>
-                <p className="text-[#57534E]">{act.measure}</p>
+                <p className="text-[#57534E]">{toPlainOwnerWords(act.measure)}</p>
                 {(act.beforeRefundRateFact || act.afterRefundRateFact) && (
                   <p className="text-[#57534E]">
                     {act.beforeRefundRateFact && (
@@ -776,11 +929,18 @@ export function OwnerFeed({
         )}
       </section>
 
-      {/* 3. Done for you (proven / closed outcomes) */}
+      {/* 3. Done for you */}
       <section aria-labelledby="section-done-for-you" className="pt-5 border-t border-[#E6E1D8]">
         <h2 id="section-done-for-you" className="text-sm font-semibold text-[#171717]">
           Done for you
         </h2>
+
+        {dayState.lostAutonomyReason && (
+          <div className="mt-2 p-3 rounded-lg bg-[#FFFBEB] border border-[#FDE68A] text-xs text-[#92400E]">
+            {dayState.lostAutonomyReason}
+          </div>
+        )}
+
         {doneForYou.length === 0 ? (
           <p className="mt-2 text-sm text-[#78716C]">Nothing yet.</p>
         ) : (
@@ -788,26 +948,44 @@ export function OwnerFeed({
             {doneForYou.map((item) => (
               <li
                 key={item.decisionId}
-                className="bg-white border border-[#E6E1D8] rounded-lg px-3.5 py-2.5 text-xs space-y-1"
+                data-done-id={item.decisionId}
+                className="bg-white border border-[#E6E1D8] rounded-lg px-3.5 py-2.5 text-xs space-y-1.5"
               >
                 <div className="flex items-baseline justify-between gap-2">
-                  <span className="font-semibold text-[#171717]">{item.title}</span>
+                  <div className="flex flex-wrap items-baseline gap-1.5">
+                    <span className="font-semibold text-[#171717]">{item.title}</span>
+                    {item.isAutonomous && (
+                      <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#EEF2FF] text-[#312E81] border border-[#C7D2FE]">
+                        Acted within limits
+                      </span>
+                    )}
+                  </div>
                   <span className="font-mono text-[11px] text-[#78716C] shrink-0">
                     {formatShortDate(item.closedOn)}
                   </span>
                 </div>
+
+                {item.movedSummary && <p className="text-[#171717] font-medium">{item.movedSummary}</p>}
+                {item.whySummary && <p className="text-[#57534E]">{item.whySummary}</p>}
+
                 <p
                   className={`font-medium ${
-                    item.verdict === 'worked_proven' || item.verdict === 'worked_before_after'
+                    item.verdict === 'worked_proven' ||
+                    item.verdict === 'worked_before_after' ||
+                    item.verdict === 'worked_single_store'
                       ? 'text-[#15803D]'
-                      : item.verdict === 'did_not_work'
+                      : item.verdict === 'did_not_work' || item.verdict === 'undone'
                         ? 'text-[#991B1B]'
                         : 'text-[#57534E]'
                   }`}
                 >
                   {item.verdictSentence}
                 </p>
-                {item.detailSentence && <p className="text-[#57534E]">{item.detailSentence}</p>}
+
+                {item.detailSentence && (
+                  <p className="text-[#57534E]">{toPlainOwnerWords(item.detailSentence)}</p>
+                )}
+
                 {(item.beforeRefundRateFact || item.afterRefundRateFact) && (
                   <p className="text-[#57534E]">
                     {item.beforeRefundRateFact && (
@@ -824,12 +1002,41 @@ export function OwnerFeed({
                     )}
                   </p>
                 )}
-                {item.provenMoneyFact && (
-                  <p className="text-[#57534E]">
-                    Proven gain:{' '}
-                    <FactValue fact={item.provenMoneyFact} onInspect={onInspectFact} />
-                  </p>
-                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-3 text-[#57534E]">
+                    {item.expectedWorthFact && (
+                      <span>
+                        Expected worth:{' '}
+                        <FactValue fact={item.expectedWorthFact} onInspect={onInspectFact} />
+                      </span>
+                    )}
+                    {item.provenMoneyFact && (
+                      <span>
+                        Proven gain:{' '}
+                        <FactValue fact={item.provenMoneyFact} onInspect={onInspectFact} />
+                      </span>
+                    )}
+                    {item.unitsReturnedFact && (
+                      <span>
+                        Returned:{' '}
+                        <FactValue fact={item.unitsReturnedFact} onInspect={onInspectFact} />
+                      </span>
+                    )}
+                  </div>
+
+                  {item.canUndo && (
+                    <button
+                      type="button"
+                      disabled={isRequestInFlight}
+                      onClick={() => onUndoAction?.(item.decisionId)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium bg-white hover:bg-[#FEF2F2] text-[#991B1B] border border-[#FECACA] rounded-md transition-colors disabled:opacity-50 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Undo</span>
+                    </button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
@@ -887,12 +1094,12 @@ export function OwnerFeed({
                     className="w-full text-left px-3.5 py-2.5 flex items-baseline justify-between gap-3 hover:bg-[#FAF8F5] transition-colors cursor-pointer"
                   >
                     <div className="min-w-0">
-                      <p className="text-sm text-[#57534E]">{group.headline}</p>
+                      <p className="text-sm text-[#57534E]">{toPlainOwnerWords(group.headline)}</p>
                       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-[#78716C]">
                         {storeNames.length > 1 && <span>{storeNames.join(', ')}</span>}
                         {typeof group.confidence === 'number' && (
                           <span className="font-mono text-[11px]">
-                            confidence {group.confidence.toFixed(2)}
+                            {Math.round(group.confidence * 100)}% sure
                           </span>
                         )}
                       </div>
@@ -915,13 +1122,13 @@ export function OwnerFeed({
                           className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 pb-1.5 border-b border-[#E6E1D8] last:border-b-0 last:pb-0"
                         >
                           <div className="font-medium text-[#171717]">
-                            {item.storeName ?? 'Established chain'}
+                            {item.storeName ?? 'Comparable stores'}
                             <span className="ml-2 font-mono text-[11px] font-normal text-[#78716C]">
                               {formatShortDate(item.date)}
                             </span>
                             {typeof item.confidence === 'number' && (
                               <span className="ml-2 font-mono text-[11px] font-normal text-[#78716C]">
-                                conf {item.confidence.toFixed(2)}
+                                {Math.round(item.confidence * 100)}% sure
                               </span>
                             )}
                           </div>
@@ -936,7 +1143,7 @@ export function OwnerFeed({
                             </span>
                           </div>
                           {group.items.length === 1 && (
-                            <p className="w-full text-[#78716C]">{item.reason}</p>
+                            <p className="w-full text-[#78716C]">{toPlainOwnerWords(item.reason)}</p>
                           )}
                         </div>
                       ))}
@@ -979,7 +1186,8 @@ export function OwnerFeed({
                     <p className="mt-0.5 text-[#57534E]">
                       {tool.storeName} · Installed {formatShortDate(tool.installedOn)} ·{' '}
                       <span className="font-mono">
-                        {tool.model} ({tool.latencyMs} ms, {tool.mode})
+                        {tool.model} · {formatSecondsFromMs(tool.latencyMs)}
+                        {tool.mode === 'replayed' ? ' (replayed)' : ''}
                       </span>
                     </p>
                     {tool.usedFallbackCopy && (
@@ -994,7 +1202,9 @@ export function OwnerFeed({
                   <button
                     type="button"
                     onClick={() => onOpenBuiltTool?.(tool.id)}
-                    className="px-3 py-1.5 bg-[#312E81] hover:bg-[#26236B] text-white text-xs font-semibold rounded-lg transition-colors shrink-0 cursor-pointer"
+                    className={`px-3 py-1.5 bg-[#312E81] hover:bg-[#26236B] text-white text-xs font-semibold rounded-lg transition-colors shrink-0 cursor-pointer ${highlightRing(
+                      `open_tool:${tool.id}`,
+                    )}`}
                   >
                     Open tool
                   </button>
@@ -1036,12 +1246,66 @@ export function OwnerFeed({
         )}
       </section>
 
-      {/* 6. Record */}
+      {/* 6. Record (Part A) */}
       <section aria-labelledby="section-record" className="pt-5 border-t border-[#E6E1D8]">
         <h2 id="section-record" className="text-sm font-semibold text-[#171717]">
           Record
         </h2>
-        <p className="mt-2 text-sm text-[#78716C]">Nothing yet.</p>
+        {!dayState.autonomyRecord ? (
+          <p className="mt-2 text-sm text-[#78716C]">Nothing yet.</p>
+        ) : (
+          <div className="mt-2 bg-white border border-[#E6E1D8] rounded-xl p-3.5 text-xs space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-semibold text-[#171717]">
+                {dayState.autonomyRecord.kindLabel}
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded-md border font-medium text-[11px] ${
+                  dayState.autonomyRecord.level === 'autonomous_within_limits'
+                    ? 'bg-[#EEF2FF] text-[#312E81] border-[#C7D2FE]'
+                    : 'bg-[#FAF8F5] text-[#57534E] border-[#E6E1D8]'
+                }`}
+              >
+                {dayState.autonomyRecord.levelLabel}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-2.5 rounded-lg bg-[#FAF8F5] border border-[#F3F0EA]">
+              <div>
+                <p className="text-[11px] text-[#78716C]">Cases</p>
+                <p className="mt-0.5 font-semibold text-[#171717]">
+                  <FactValue fact={dayState.autonomyRecord.casesFact} onInspect={onInspectFact} />
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#78716C]">Worked</p>
+                <p className="mt-0.5 font-semibold text-[#171717]">
+                  <FactValue fact={dayState.autonomyRecord.workedFact} onInspect={onInspectFact} />
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#78716C]">Proven vs held-out</p>
+                <p className="mt-0.5 font-semibold text-[#171717]">
+                  <FactValue fact={dayState.autonomyRecord.provenFact} onInspect={onInspectFact} />
+                </p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#78716C]">Combined gain</p>
+                <p className="mt-0.5 font-semibold text-[#171717]">
+                  <FactValue
+                    fact={dayState.autonomyRecord.pooledMoneyFact}
+                    onInspect={onInspectFact}
+                  />
+                </p>
+              </div>
+            </div>
+
+            <p className="text-[#57534E] leading-relaxed">
+              <strong className="text-[#171717]">Rule to act alone:</strong>{' '}
+              {dayState.autonomyRecord.earnRuleText}
+            </p>
+          </div>
+        )}
       </section>
     </div>
   );

@@ -32,8 +32,12 @@ export interface GatewayActionRequest {
   title?: string;
   parentDecisionId?: string;
   ownerApproved: boolean;
+  autonomous?: boolean;
+  autonomyGranted?: boolean;
   approvedBy?: string;
   plan?: TransferPlan;
+  whySummary?: string;
+  expectedWorthUsd?: number;
 }
 
 export interface GatewayActionResult {
@@ -163,7 +167,7 @@ export function executeActionThroughGateway(
       );
     }
 
-    // Enforce > 500-unit rule and general owner approval requirement (Stage 3 has no autonomous authority yet)
+    // Enforce > 500-unit rule and general owner approval / earned autonomy limits
     if (totalUnits > 500 && !request.ownerApproved) {
       const reason = `Refused: transfer of ${totalUnits} units exceeds the 500-unit limit and requires owner approval.`;
       const traceEntry: TraceEntry = {
@@ -179,8 +183,19 @@ export function executeActionThroughGateway(
       return { ok: false, refusalReason: reason, traceEntry };
     }
 
-    if (!request.ownerApproved) {
-      const reason = 'Refused: action requires owner approval (no autonomous authority granted yet).';
+    const receiverStoresCount = new Set(lines.map((l) => l.toStoreId)).size;
+    const isAutonomousAllowed =
+      Boolean(request.autonomous) &&
+      Boolean(request.autonomyGranted) &&
+      totalUnits <= 500 &&
+      receiverStoresCount === 1 &&
+      !request.holdoutStoreId &&
+      !request.plan?.holdoutStoreId;
+
+    if (!request.ownerApproved && !isAutonomousAllowed) {
+      const reason = request.autonomous
+        ? 'Refused: autonomous authority is not enabled or transfer exceeds the 500-unit / single-store rule.'
+        : 'Refused: action requires owner approval (no autonomous authority granted yet).';
       const traceEntry: TraceEntry = {
         id: `trace:${date}:gw:no_approval:${gatewayAttemptLog.length}`,
         date,
@@ -285,20 +300,23 @@ export function executeActionThroughGateway(
       holdoutStoreId: request.holdoutStoreId ?? request.plan?.holdoutStoreId,
       holdoutStoreName: request.holdoutStoreName ?? request.plan?.holdoutStoreName,
       totalUnits,
-      approvedBy: request.approvedBy ?? 'Owner',
+      approvedBy: isAutonomousAllowed ? 'Autonomy within limits' : request.approvedBy ?? 'Owner',
       approvedAtDate: date,
       measure,
       proofEndDate,
       parentDecisionId: request.parentDecisionId,
       title: request.title ?? `${grpLabel} transfer to ${toNames}`,
+      isAutonomous: isAutonomousAllowed,
+      whySummary: request.whySummary,
+      expectedWorthUsd: request.expectedWorthUsd ?? request.plan?.weeklyRecoveryFact.value,
     };
 
     const unitsFact: Fact = createFact(
       `gw:${decisionId}:units`,
-      'Approved transfer units',
+      isAutonomousAllowed ? 'Autonomous transfer units' : 'Approved transfer units',
       totalUnits,
       'units',
-      `Approved by ${decision.approvedBy} on ${date} through the gateway; arriving at ${toNames} on ${arrivalDate} (+2 days).`,
+      `${isAutonomousAllowed ? 'Executed automatically within your 500-unit rule' : `Approved by ${decision.approvedBy}`} on ${date} through the gateway; arriving at ${toNames} on ${arrivalDate} (+2 days).`,
     );
 
     const traceEntry: TraceEntry = {
@@ -306,8 +324,10 @@ export function executeActionThroughGateway(
       date,
       lane: 'manager',
       kind: 'gateway',
-      headline: `Gateway approved: ${grpLabel} transfer (${totalUnits} units)`,
-      detail: `From ${fromNames} to ${toNames} · arrives ${formatShortDate(arrivalDate)} · approved by ${decision.approvedBy} · proof target ${formatShortDate(proofEndDate)}.`,
+      headline: isAutonomousAllowed
+        ? `Gateway passed automatically: ${grpLabel} transfer (${totalUnits} units, under 500-unit limit)`
+        : `Gateway approved: ${grpLabel} transfer (${totalUnits} units)`,
+      detail: `From ${fromNames} to ${toNames} · arrives ${formatShortDate(arrivalDate)} · ${isAutonomousAllowed ? 'done within your rules' : `approved by ${decision.approvedBy}`} · proof target ${formatShortDate(proofEndDate)}.`,
       outcome: 'raised',
       facts: [unitsFact],
     };

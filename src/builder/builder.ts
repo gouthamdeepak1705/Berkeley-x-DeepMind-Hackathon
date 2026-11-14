@@ -1,43 +1,19 @@
 import {
   callInteractionRaw,
   formatGeminiError,
-  getApiKey,
   getUnavailableModelReason,
-  isCapReached,
+  isGeminiCallBlocked,
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
 import { GEMINI_SETTINGS } from '../gemini/settings';
 import { BuilderRequirement, RefundRecord } from '../types/domain';
-import { FALLBACK_REFUND_DESK_HTML, isFlaggedRefundRecord } from './fallbackTool';
-
-export interface FlaggedRefundStats {
-  flaggedRows: RefundRecord[];
-  count: number;
-  total: number;
-  unreviewedFlaggedCount: number;
-}
-
-export function computeExpectedFlaggedStats(
-  rows: RefundRecord[],
-  reviewedIds: Set<string> = new Set(),
-): FlaggedRefundStats {
-  const flaggedRows = rows.filter(isFlaggedRefundRecord);
-  let totalCents = 0;
-  let unreviewedFlaggedCount = 0;
-  for (const r of flaggedRows) {
-    totalCents += Math.round(r.amount * 100);
-    if (!reviewedIds.has(r.id)) {
-      unreviewedFlaggedCount++;
-    }
-  }
-  return {
-    flaggedRows,
-    count: flaggedRows.length,
-    total: Math.round(totalCents) / 100,
-    unreviewedFlaggedCount,
-  };
-}
+import { FALLBACK_REFUND_DESK_HTML } from './fallbackTool';
+export {
+  computeExpectedFlaggedStats,
+  injectSandboxCsp,
+  type FlaggedRefundStats,
+} from './sandboxUtils';
 
 export function stripHtmlFences(raw: string): string {
   let s = raw.trim();
@@ -52,20 +28,6 @@ export function stripHtmlFences(raw: string): string {
     s = s.slice(docIdx);
   }
   return s.trim();
-}
-
-export function injectSandboxCsp(html: string): string {
-  const cspMeta =
-    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\';" />';
-  if (/http-equiv=["']Content-Security-Policy["']/i.test(html)) {
-    return html;
-  }
-  const headMatch = /<head[^>]*>/i.exec(html);
-  if (headMatch) {
-    const insertAt = headMatch.index + headMatch[0].length;
-    return `${html.slice(0, insertAt)}\n  ${cspMeta}${html.slice(insertAt)}`;
-  }
-  return `${cspMeta}\n${html}`;
 }
 
 export interface BuildToolHtmlResult {
@@ -133,7 +95,8 @@ export async function buildRefundDeskHtml(params: {
   const { requirement, sampleRows } = params;
   const cfg = GEMINI_SETTINGS.jobs.builder_tool;
 
-  if (!getApiKey() || isCapReached(cfg.capBucket)) {
+  const blockReason = isGeminiCallBlocked(cfg.capBucket);
+  if (blockReason) {
     recordGeminiCall({
       feature: 'builder:tool:refund_exceptions_desk',
       job: cfg.key,
@@ -142,7 +105,7 @@ export async function buildRefundDeskHtml(params: {
       inputTokens: 0,
       outputTokens: 0,
       mode: 'fallback',
-      error: !getApiKey() ? 'No GEMINI_API_KEY configured' : 'Daily cap reached',
+      error: blockReason,
     });
     const byteSize = Buffer.byteLength(FALLBACK_REFUND_DESK_HTML, 'utf8');
     return {
@@ -225,7 +188,7 @@ export async function repairRefundDeskHtml(params: {
   const { brokenHtml, failureReasons, requirement, sampleRows } = params;
   const cfg = GEMINI_SETTINGS.jobs.builder_tool;
 
-  if (!getApiKey() || isCapReached(cfg.capBucket)) {
+  if (isGeminiCallBlocked(cfg.capBucket)) {
     const byteSize = Buffer.byteLength(FALLBACK_REFUND_DESK_HTML, 'utf8');
     return {
       html: FALLBACK_REFUND_DESK_HTML,

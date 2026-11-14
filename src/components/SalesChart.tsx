@@ -20,7 +20,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
   const plotW = CHART_WIDTH - PAD_LEFT - PAD_RIGHT;
   const plotH = CHART_HEIGHT - PAD_TOP - PAD_BOTTOM;
 
-  // Fixed sensible Y domain covering Aug-Nov 7-day totals (~140k to ~340k)
   let minVal = 140_000;
   let maxVal = 340_000;
   for (const p of points) {
@@ -35,7 +34,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
   const yForValue = (val: number) =>
     PAD_TOP + plotH - ((val - minVal) / Math.max(1, maxVal - minVal)) * plotH;
 
-  // Build ±8% shaded band polygon
   let bandPath = '';
   if (points.length > 1) {
     const upper = points.map((p, i) => `${xForIndex(i).toFixed(1)},${yForValue(p.bandHigh).toFixed(1)}`);
@@ -49,7 +47,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
     bandPath = `M ${upper.join(' L ')} L ${lower.join(' L ')} Z`;
   }
 
-  // Expected center reference line (dashed subtle)
   const expectedPath =
     points.length > 1
       ? `M ${points
@@ -57,7 +54,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
           .join(' L ')}`
       : '';
 
-  // Segment paths: indigo when inside band, amber when either endpoint leaves the ±8% band
   const segments: { d: string; amber: boolean; key: string }[] = [];
   for (let i = 1; i < points.length; i++) {
     const prev = points[i - 1];
@@ -74,10 +70,7 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
   const lastX = xForIndex(points.length - 1);
   const lastY = yForValue(lastPt.actual7d);
 
-  // Axis ticks
   const yTicks = [minVal, (minVal + maxVal) / 2, maxVal];
-  // Calendar event markers on full 106-day axis:
-  // Day 0 = Aug 1 (Summer lull starts), Day 35 = Sep 5 (Labor Day), Day 37 = Sep 7 (Lull ends), Day 61 = Oct 1, Day 92 = Nov 1
   const axisMarkers = [
     { idx: 0, label: 'Aug 1', event: 'Lull' },
     { idx: 37, label: 'Sep 7', event: 'Labor Day' },
@@ -88,13 +81,13 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
   const { total28dSales, total28dChangePct, lfl28dVsExpectedPct } = dayState.headlineFacts;
 
   return (
-    <section aria-label="Established-store trailing 7-day sales chart" className="mt-5">
-      <div className="flex items-baseline justify-between gap-2 mb-2">
+    <section aria-label="Sales this week against what was expected" className="mt-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
         <h2 className="text-xs font-semibold text-[#57534E]">
-          Established stores · trailing 7d vs ±8% band
+          Sales this week against what was expected
         </h2>
         <span className="text-xs font-mono tabular-nums text-[#57534E] whitespace-nowrap shrink-0">
-          LFL 28d:{' '}
+          Comparable stores:{' '}
           <FactValue fact={lfl28dVsExpectedPct} onInspect={onInspectFact} />
         </span>
       </div>
@@ -104,9 +97,8 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
           viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
           className="w-full h-auto overflow-visible"
           role="img"
-          aria-label={`Established-store trailing 7-day sales chart through ${dayState.date}`}
+          aria-label={`Sales this week against what was expected through ${dayState.date}`}
         >
-          {/* Horizontal gridlines + Y labels */}
           {yTicks.map((val) => {
             const y = yForValue(val);
             return (
@@ -131,7 +123,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
             );
           })}
 
-          {/* Summer lull shading on axis (Aug 1 = idx 0 to Sep 7 = idx 37) */}
           <rect
             x={xForIndex(0)}
             y={PAD_TOP}
@@ -141,7 +132,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
             opacity="0.55"
           />
 
-          {/* Labor Day weekend marker band (Sep 5 = idx 35 to Sep 7 = idx 37) */}
           <rect
             x={xForIndex(35)}
             y={PAD_TOP}
@@ -151,10 +141,8 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
             opacity="0.85"
           />
 
-          {/* ±8% expected band */}
           {bandPath && <path d={bandPath} fill="#312E81" opacity="0.10" />}
 
-          {/* Expected center line */}
           {expectedPath && (
             <path
               d={expectedPath}
@@ -166,7 +154,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
             />
           )}
 
-          {/* Actual 7-day line segments */}
           {segments.map((seg) => (
             <path
               key={seg.key}
@@ -178,7 +165,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
             />
           ))}
 
-          {/* Current day marker */}
           <circle
             cx={lastX}
             cy={lastY}
@@ -188,7 +174,6 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
             strokeWidth="1.5"
           />
 
-          {/* Time axis labels & calendar event markers */}
           {axisMarkers.map((m) => {
             const x = xForIndex(m.idx);
             return (
@@ -224,7 +209,7 @@ export function SalesChart({ dayState, totalDays, onInspectFact }: SalesChartPro
           })}
         </svg>
 
-        <div className="mt-2 pt-2.5 border-t border-[#E6E1D8] flex items-center justify-between gap-2 text-xs text-[#57534E]">
+        <div className="mt-2 pt-2.5 border-t border-[#E6E1D8] flex flex-wrap items-center justify-between gap-2 text-xs text-[#57534E]">
           <span>
             Last 28 days, all stores:{' '}
             <FactValue

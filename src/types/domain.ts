@@ -313,6 +313,7 @@ export interface InvestigationResult {
   factsById: Record<string, Fact>;
   secondCheck?: SecondCheckResult;
   transferPlan?: TransferPlan;
+  jobKey?: 'investigate_large' | 'investigate_routine';
 }
 
 export interface InstinctMeta {
@@ -433,8 +434,12 @@ export interface ActionDecision {
   measure?: string;
   proofEndDate?: string;
   undoneOnDate?: string;
+  unitsReturned?: number;
   parentDecisionId?: string;
   title?: string;
+  isAutonomous?: boolean;
+  whySummary?: string;
+  expectedWorthUsd?: number;
 }
 
 export interface InProgressAction {
@@ -457,16 +462,112 @@ export interface DoneForYouItem {
   decisionId: string;
   candidateId: string;
   title: string;
-  verdict: 'worked_proven' | 'worked_before_after' | 'unclear' | 'did_not_work';
+  verdict:
+    | 'worked_proven'
+    | 'worked_single_store'
+    | 'worked_before_after'
+    | 'autonomous_pending'
+    | 'undone'
+    | 'unclear'
+    | 'did_not_work';
   verdictSentence: string;
   detailSentence?: string;
   approvedOn: string;
   closedOn: string;
   provenMoneyFact?: Fact;
+  expectedWorthFact?: Fact;
+  movedUnitsFact?: Fact;
+  unitsReturnedFact?: Fact;
+  movedSummary?: string;
+  whySummary?: string;
   beforeRefundRateFact?: Fact;
   afterRefundRateFact?: Fact;
   undone?: boolean;
+  isAutonomous?: boolean;
+  canUndo?: boolean;
   holdoutStoreName?: string;
+}
+
+export type AutonomyLevel = 'recommend_decide' | 'autonomous_within_limits';
+
+export interface AutonomyOfferCard {
+  id: string;
+  offeredOn: string;
+  kindLabel: string;
+  headline: string;
+  body: string;
+  status: 'pending' | 'accepted' | 'declined';
+  decidedOn?: string;
+}
+
+export interface AutonomyReaction {
+  id: string;
+  offerId: string;
+  date: string;
+  dayIndex: number;
+  reaction: 'enable_autonomy' | 'keep_asking';
+}
+
+export interface AutonomyRecord {
+  kindLabel: string;
+  casesFact: Fact;
+  workedFact: Fact;
+  provenFact: Fact;
+  pooledMoneyFact: Fact;
+  level: AutonomyLevel;
+  levelLabel: string;
+  earnRuleText: string;
+  earnRuleMet: boolean;
+  consecutiveStreakWorked: number;
+  consecutiveUndos: number;
+  lostAutonomyReason?: string;
+  offerCard?: AutonomyOfferCard;
+}
+
+export interface EndStatementData {
+  generatedOn: string;
+  money: {
+    provenAvoidedFact: Fact;
+    delayCostFact: Fact;
+    refundLeakageStoppedFact: Fact;
+    routineTransfersCountFact: Fact;
+    autonomousTransfersCountFact: Fact;
+    storeTasksCountFact: Fact;
+  };
+  noticing: {
+    realRaisedFact: Fact;
+    realTotalFact: Fact;
+    medianDaysEarlyFact: Fact;
+    lookAlikesRaisedFact: Fact;
+    lookAlikesTotalFact: Fact;
+    medianDecisionMsFact: Fact;
+    realDetails: Array<{ label: string; targetDate: string; raisedDate: string | null; daysEarly: number | null }>;
+  };
+  wrongOrUnproven: {
+    didNotWorkCountFact: Fact;
+    undoneCountFact: Fact;
+    unprovenOnlyCountFact: Fact;
+    disagreementsCountFact: Fact;
+    fallbacksCountFact: Fact;
+    notes: string[];
+  };
+  cost: {
+    totalCallsFact: Fact;
+    decisionCallsFact: Fact;
+    otherCallsFact: Fact;
+    estimatedCostUsdFact: Fact;
+    liveModeCostNote: string;
+  };
+  built: {
+    toolsBuiltFact: Fact;
+    tools: Array<{
+      title: string;
+      installedOn: string;
+      testsPassedFact: Fact;
+      testsTotalFact: Fact;
+      usedFallbackCopy: boolean;
+    }>;
+  };
 }
 
 export interface BuilderRequirement {
@@ -596,6 +697,11 @@ export interface DayState {
   reviewedRefundIds?: string[];
   refundRows?: RefundRecord[];
   toolUnreviewedFact?: Fact;
+  autonomyRecord?: AutonomyRecord;
+  lostAutonomyReason?: string;
+  endStatement?: EndStatementData;
+  geminiMode?: 'replay' | 'live';
+  geminiCapBanner?: string;
 }
 
 export interface DiagnosticTargetResult {

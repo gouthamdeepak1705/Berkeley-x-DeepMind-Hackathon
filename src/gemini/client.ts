@@ -1,8 +1,30 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { GoogleGenAI } from '@google/genai';
 import { GEMINI_SETTINGS, GeminiJobKey, ThinkingLevelSetting } from './settings';
 
 export type CallMode = 'live' | 'replayed' | 'fallback';
+export type GeminiPlaybackMode = 'replay' | 'live';
+
+export interface RecordedRunEntry {
+  cacheKey: string;
+  kind: 'decisions' | 'interactions';
+  model: string;
+  job: GeminiJobKey;
+  feature: string;
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  data: unknown;
+}
+
+export interface RecordedRunFile {
+  version: 1;
+  generatedAt: string;
+  seed: number;
+  entries: RecordedRunEntry[];
+}
 
 export interface GeminiCallRecord {
   id: string;
@@ -34,6 +56,9 @@ export interface GeminiUsageSummary {
   totalOutputTokens: number;
   estimatedCostUsd: number;
   hasApiKey: boolean;
+  geminiMode: GeminiPlaybackMode;
+  capBanner: string | null;
+  recordedCount: number;
   unavailableModels: Record<string, string>;
   recentCalls: GeminiCallRecord[];
 }
@@ -141,17 +166,80 @@ export interface InteractionCallResult {
   steps: InteractionStep[];
 }
 
-// Module-level server state (never written to disk)
+// Module-level server state (never written to disk automatically)
 let cachedClient: GoogleGenAI | null = null;
 let cachedClientKey: string | undefined;
+let geminiPlaybackMode: GeminiPlaybackMode = 'replay';
+let capBannerMessage: string | null = null;
 
 const responseCache = new Map<string, unknown>();
+const recordedEntries = new Map<string, RecordedRunEntry>();
 const unavailableModels = new Map<string, string>();
 const callRecords: GeminiCallRecord[] = [];
 let nextCallRecordSeq = 1;
 let currentCapDay = getUtcDayKey();
 let uncachedDecisionCount = 0;
 let uncachedOtherCount = 0;
+
+export function getGeminiPlaybackMode(): GeminiPlaybackMode {
+  return geminiPlaybackMode;
+}
+
+export function setGeminiPlaybackMode(mode: GeminiPlaybackMode): GeminiPlaybackMode {
+  if (mode === 'live' && (isCapReached('decision') || isCapReached('other'))) {
+    geminiPlaybackMode = 'replay';
+    capBannerMessage = 'Daily Gemini call limit reached — locked to Replay for this session.';
+    return geminiPlaybackMode;
+  }
+  geminiPlaybackMode = mode;
+  if (mode === 'live') {
+    capBannerMessage = null;
+  }
+  return geminiPlaybackMode;
+}
+
+export function getGeminiCapBanner(): string | null {
+  return capBannerMessage;
+}
+
+export function exportRecordedRunFile(seed: number = 20260801): RecordedRunFile {
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    seed,
+    entries: Array.from(recordedEntries.values()),
+  };
+}
+
+export function loadRecordedRunEntries(entries: RecordedRunEntry[]): number {
+  let loaded = 0;
+  for (const e of entries) {
+    if (!e || !e.cacheKey || !e.data) continue;
+    recordedEntries.set(e.cacheKey, e);
+    responseCache.set(e.cacheKey, e.data);
+    loaded += 1;
+  }
+  return loaded;
+}
+
+export function loadRecordedRunFromDisk(filePath?: string): number {
+  if (typeof window !== 'undefined') return 0;
+  try {
+    const resolved = filePath ?? path.resolve(process.cwd(), 'recorded_run.json');
+    if (!fs.existsSync(resolved)) return 0;
+    const raw = fs.readFileSync(resolved, 'utf8');
+    if (!raw.trim()) return 0;
+    const parsed = JSON.parse(raw) as Partial<RecordedRunFile>;
+    if (!Array.isArray(parsed.entries)) return 0;
+    return loadRecordedRunEntries(parsed.entries);
+  } catch {
+    return 0;
+  }
+}
+
+if (typeof window === 'undefined') {
+  loadRecordedRunFromDisk();
+}
 
 function getUtcDayKey(): string {
   return new Date().toISOString().slice(0, 10);
@@ -163,6 +251,7 @@ function resetDailyCountersIfNewDay(): void {
     currentCapDay = today;
     uncachedDecisionCount = 0;
     uncachedOtherCount = 0;
+    capBannerMessage = null;
   }
 }
 
@@ -194,10 +283,12 @@ export function getGeminiClient(): GoogleGenAI | null {
 
 export function clearGeminiMemoryCache(): void {
   responseCache.clear();
+  recordedEntries.clear();
   unavailableModels.clear();
   callRecords.length = 0;
   uncachedDecisionCount = 0;
   uncachedOtherCount = 0;
+  capBannerMessage = null;
 }
 
 export function getUnavailableModelReason(model: string): string | undefined {
@@ -210,6 +301,24 @@ export function isCapReached(bucket: 'decision' | 'other'): boolean {
     return uncachedDecisionCount >= GEMINI_SETTINGS.dailyCaps.decision;
   }
   return uncachedOtherCount >= GEMINI_SETTINGS.dailyCaps.other;
+}
+
+export function isGeminiCallBlocked(bucket: 'decision' | 'other'): string | null {
+  if (geminiPlaybackMode === 'replay') {
+    if (recordedEntries.size > 0) {
+      return null;
+    }
+    return !getApiKey()
+      ? 'No GEMINI_API_KEY configured'
+      : 'Replay mode active with empty recorded cache';
+  }
+  if (!getApiKey()) {
+    return 'No GEMINI_API_KEY configured';
+  }
+  if (isCapReached(bucket)) {
+    return 'Daily cap reached';
+  }
+  return null;
 }
 
 function incrementUncachedCount(bucket: 'decision' | 'other'): void {
@@ -276,6 +385,9 @@ export function getGeminiUsageSummary(): GeminiUsageSummary {
     totalOutputTokens,
     estimatedCostUsd: Math.round(estimatedCostUsd * 10000) / 10000,
     hasApiKey: Boolean(getApiKey()),
+    geminiMode: geminiPlaybackMode,
+    capBanner: capBannerMessage,
+    recordedCount: recordedEntries.size,
     unavailableModels: Object.fromEntries(unavailableModels.entries()),
     recentCalls: callRecords.slice(-50).reverse(),
   };
@@ -341,6 +453,7 @@ export async function callDecisionsRaw(params: {
   timeoutMs: number;
   feature: string;
   bypassCache?: boolean;
+  allowLiveInReplay?: boolean;
 }): Promise<{
   payload: DecisionResponsePayload;
   mode: CallMode;
@@ -378,12 +491,18 @@ export async function callDecisionsRaw(params: {
     };
   }
 
+  if (geminiPlaybackMode === 'replay' && !params.allowLiveInReplay) {
+    throw new Error('Replay mode active: no recorded Gemini response for this request.');
+  }
+
   const apiKey = getApiKey();
   const client = getGeminiClient();
   if (!apiKey || !client) {
     throw new Error('GEMINI_API_KEY is not configured on the server.');
   }
   if (isCapReached('decision')) {
+    geminiPlaybackMode = 'replay';
+    capBannerMessage = 'Daily Gemini call limit reached — switched to Replay for this session.';
     throw new Error(`Daily uncached call cap (${GEMINI_SETTINGS.dailyCaps.decision}) reached for decision model.`);
   }
 
@@ -463,9 +582,21 @@ export async function callDecisionsRaw(params: {
     const outputTokens = rawResp.usage?.total_output_tokens ?? 0;
 
     if (!params.bypassCache) {
-      responseCache.set(cacheKey, {
+      const cacheData = {
         payload: rawResp,
         originalLatencyMs: latencyMs,
+      };
+      responseCache.set(cacheKey, cacheData);
+      recordedEntries.set(cacheKey, {
+        cacheKey,
+        kind: 'decisions',
+        model: params.model,
+        job: 'watcher',
+        feature: params.feature,
+        latencyMs,
+        inputTokens,
+        outputTokens,
+        data: cacheData,
       });
     }
 
@@ -512,6 +643,7 @@ export async function callInteractionRaw(params: {
   thinkingLevel?: ThinkingLevelSetting;
   timeoutMs: number;
   bypassCache?: boolean;
+  allowLiveInReplay?: boolean;
   store?: boolean;
 }): Promise<InteractionCallResult> {
   const thinkingLevel = params.thinkingLevel ?? GEMINI_SETTINGS.jobs[params.job].thinkingLevel;
@@ -544,12 +676,18 @@ export async function callInteractionRaw(params: {
     };
   }
 
+  if (geminiPlaybackMode === 'replay' && !params.allowLiveInReplay) {
+    throw new Error('Replay mode active: no recorded Gemini response for this request.');
+  }
+
   const client = getGeminiClient();
   if (!client) {
     throw new Error('GEMINI_API_KEY is not configured on the server.');
   }
   const bucket = GEMINI_SETTINGS.jobs[params.job].capBucket;
   if (isCapReached(bucket)) {
+    geminiPlaybackMode = 'replay';
+    capBannerMessage = 'Daily Gemini call limit reached — switched to Replay for this session.';
     throw new Error(
       `Daily uncached call cap (${GEMINI_SETTINGS.dailyCaps[bucket]}) reached for ${bucket} models.`,
     );
@@ -644,7 +782,7 @@ export async function callInteractionRaw(params: {
     };
 
     if (!params.bypassCache) {
-      responseCache.set(cacheKey, {
+      const cacheData = {
         id: result.id,
         model: result.model,
         latencyMs: result.latencyMs,
@@ -652,6 +790,18 @@ export async function callInteractionRaw(params: {
         outputTokens: result.outputTokens,
         output_text: result.output_text,
         steps: result.steps,
+      };
+      responseCache.set(cacheKey, cacheData);
+      recordedEntries.set(cacheKey, {
+        cacheKey,
+        kind: 'interactions',
+        model: params.model,
+        job: params.job,
+        feature: params.feature,
+        latencyMs: result.latencyMs,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        data: cacheData,
       });
     }
 
@@ -718,6 +868,7 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
             timeoutMs,
             feature: 'connection_test:watcher',
             bypassCache: true,
+            allowLiveInReplay: true,
           });
           const ans = res.payload.answers?.normal_day;
           const elapsed = res.latencyMs;
@@ -748,6 +899,7 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
             },
             timeoutMs,
             bypassCache: true,
+            allowLiveInReplay: true,
             store: false,
           });
           const elapsed = res.latencyMs;
@@ -820,6 +972,7 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
           tools: [testTool],
           timeoutMs,
           bypassCache: true,
+          allowLiveInReplay: true,
         });
         const fnCalls = step1.steps.filter((s) => s.type === 'function_call');
         if (fnCalls.length > 0 && fnCalls[0].id) {
@@ -844,6 +997,7 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
             ],
             timeoutMs,
             bypassCache: true,
+            allowLiveInReplay: true,
           });
           const elapsed = step1.latencyMs + step2.latencyMs;
           totalMs += elapsed;
@@ -917,6 +1071,7 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
           },
           timeoutMs,
           bypassCache: true,
+          allowLiveInReplay: true,
           store: false,
         });
         const parsed = JSON.parse(res.output_text) as { sentence?: string };
@@ -973,6 +1128,7 @@ export async function runConnectionTests(): Promise<ConnectionTestReport> {
           tools: [{ type: 'code_execution' }],
           timeoutMs,
           bypassCache: true,
+          allowLiveInReplay: true,
           store: false,
         });
         const codeSteps = res.steps.filter((s) => s.type === 'code_execution_result');

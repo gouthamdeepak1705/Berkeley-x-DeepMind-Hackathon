@@ -22,13 +22,17 @@ export function buildTransferPlanForGroup(params: {
     .sort((a, b) => (a.date < b.date ? -1 : 1))[0];
   const daysUntilDelivery = nextDel ? Math.max(1, diffDays(date, nextDel.date)) : null;
 
+  const baselineWeeklyForStore = (storeId: StoreId): number => {
+    const store = STORE_MAP[storeId];
+    const grpShare = groupId === 'best_sellers' ? 0.35 : 0.15;
+    return (store.baseDailySales * 7 * grpShare * 1.06) / avgPrice;
+  };
+
   const avgWeeklyForStore = (storeId: StoreId): number => {
     const gs = recs[storeId].groups[groupId];
     const cov = gs.weeksOfCover ?? 0;
     if (cov > 0.01) return gs.endingStock / cov;
-    const store = STORE_MAP[storeId];
-    const grpShare = groupId === 'best_sellers' ? 0.35 : 0.15;
-    return (store.baseDailySales * 7 * grpShare * 1.06) / avgPrice;
+    return baselineWeeklyForStore(storeId);
   };
 
   // Identify receivers: stores currently < 2.5 wks OR projected to drop < 2.5 wks within 7 days
@@ -62,7 +66,7 @@ export function buildTransferPlanForGroup(params: {
   const receiverSet = new Set<StoreId>(receiverIds);
   const deliveryPlusOneWeeks = daysUntilDelivery !== null ? daysUntilDelivery / 7 + 1 : 0;
   const donorFloorWeeks = Math.max(8, deliveryPlusOneWeeks);
-  const targetWeeks = daysUntilDelivery !== null ? daysUntilDelivery / 7 + 0.25 : 6;
+  const targetWeeks = daysUntilDelivery !== null ? daysUntilDelivery / 7 + 0.25 : 10;
 
   // Donors ordered by highest cover first
   const donors = STORES.filter((st) => {
@@ -70,14 +74,14 @@ export function buildTransferPlanForGroup(params: {
     if (receiverSet.has(st.id)) return false;
     if (controlStores.has(st.id)) return false;
     const gs = recs[st.id].groups[groupId];
-    const avgWeekly = avgWeeklyForStore(st.id);
-    const spare = gs.endingStock - donorFloorWeeks * avgWeekly;
+    const donorDemand = Math.max(avgWeeklyForStore(st.id), baselineWeeklyForStore(st.id));
+    const spare = gs.endingStock - donorFloorWeeks * donorDemand;
     return spare >= 10;
   })
     .map((st) => {
       const gs = recs[st.id].groups[groupId];
-      const avgWeekly = avgWeeklyForStore(st.id);
-      const spare = Math.max(0, Math.floor(gs.endingStock - donorFloorWeeks * avgWeekly));
+      const donorDemand = Math.max(avgWeeklyForStore(st.id), baselineWeeklyForStore(st.id));
+      const spare = Math.max(0, Math.floor(gs.endingStock - donorFloorWeeks * donorDemand));
       return {
         storeId: st.id,
         storeName: st.name,
@@ -90,8 +94,8 @@ export function buildTransferPlanForGroup(params: {
   // Compute need per treated store
   const needs = treatedStoreIds.map((sid) => {
     const gs = recs[sid].groups[groupId];
-    const avgWeekly = avgWeeklyForStore(sid);
-    const needed = Math.max(0, Math.ceil(targetWeeks * avgWeekly - gs.endingStock));
+    const demandWeekly = Math.max(avgWeeklyForStore(sid), baselineWeeklyForStore(sid));
+    const needed = Math.max(0, Math.ceil(targetWeeks * demandWeekly - gs.endingStock));
     return {
       storeId: sid,
       storeName: STORE_MAP[sid].name,

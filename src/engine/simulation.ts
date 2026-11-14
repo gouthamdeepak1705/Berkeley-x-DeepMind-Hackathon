@@ -282,10 +282,14 @@ export function runSimulation(
 
       if (decision.undoneOnDate === date) {
         for (const line of decision.transferLines) {
-          const available = stockByStore[line.toStoreId][gid];
-          const reversed = Math.min(available, line.units);
-          stockByStore[line.toStoreId][gid] = Math.max(0, available - reversed);
-          stockByStore[line.fromStoreId][gid] += reversed;
+          if (date < arrivalDate) {
+            stockByStore[line.fromStoreId][gid] += line.units;
+          } else {
+            const available = stockByStore[line.toStoreId][gid];
+            const reversed = Math.min(available, line.units);
+            stockByStore[line.toStoreId][gid] = Math.max(0, available - reversed);
+            stockByStore[line.fromStoreId][gid] += reversed;
+          }
         }
       }
     }

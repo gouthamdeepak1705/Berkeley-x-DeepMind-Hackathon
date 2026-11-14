@@ -20,8 +20,12 @@ import {
 import { evaluateActionsUpToDate } from './src/followup/proof';
 import {
   clearGeminiMemoryCache,
+  exportRecordedRunFile,
+  getGeminiCapBanner,
+  getGeminiPlaybackMode,
   getGeminiUsageSummary,
   runConnectionTests,
+  setGeminiPlaybackMode,
 } from './src/gemini/client';
 import { generateDayOneBriefWithGemini } from './src/gemini/dayOne';
 import {
@@ -29,8 +33,10 @@ import {
   executeActionThroughGateway,
   runGatewaySelfTests,
 } from './src/gateway/gateway';
+import { evaluateAutonomyRecord } from './src/autonomy/record';
 import {
   ActionDecision,
+  AutonomyReaction,
   BuilderRequirement,
   BuiltToolRecord,
   CardReaction,
@@ -61,7 +67,7 @@ async function startServer() {
   app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'opscien-instinct', stage: 4 });
+    res.json({ ok: true, service: 'opscien-instinct', stage: 5 });
   });
 
   app.get('/api/day-one', async (_req, res) => {
@@ -86,6 +92,33 @@ async function startServer() {
 
   app.get('/api/gemini/stats', (_req, res) => {
     res.json(getGeminiUsageSummary());
+  });
+
+  app.get('/api/gemini/mode', (_req, res) => {
+    res.json({
+      mode: getGeminiPlaybackMode(),
+      capBanner: getGeminiCapBanner(),
+      usage: getGeminiUsageSummary(),
+    });
+  });
+
+  app.post('/api/gemini/mode', (req, res) => {
+    const requested = (req.body as { mode?: string } | undefined)?.mode;
+    const next = setGeminiPlaybackMode(requested === 'live' ? 'live' : 'replay');
+    clearTimelineSnapshotCache();
+    res.json({
+      ok: true,
+      mode: next,
+      capBanner: getGeminiCapBanner(),
+      usage: getGeminiUsageSummary(),
+    });
+  });
+
+  app.get('/api/recorded-run/export', (_req, res) => {
+    const payload = exportRecordedRunFile(DEFAULT_SEED);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="recorded_run.json"');
+    res.send(JSON.stringify(payload, null, 2));
   });
 
   app.post('/api/dev/connection-test', async (_req, res) => {
@@ -130,6 +163,7 @@ async function startServer() {
         dayIndex?: number;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         controlStores?: string[];
         investigateTargetDay?: boolean;
         completedInvestigations?: Record<string, InvestigationResult>;
@@ -142,6 +176,7 @@ async function startServer() {
         targetDayIndex: typeof body.dayIndex === 'number' ? body.dayIndex : 0,
         decisions: Array.isArray(body.decisions) ? body.decisions : [],
         reactions: Array.isArray(body.reactions) ? body.reactions : [],
+        autonomyReactions: Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [],
         controlStores: new Set(Array.isArray(body.controlStores) ? body.controlStores : []),
         investigateTargetDay: Boolean(body.investigateTargetDay),
         providedInvestigations: toInvestigationMap(body.completedInvestigations),
@@ -152,6 +187,7 @@ async function startServer() {
 
       res.json({
         dayState: result.dayState,
+        decisions: result.decisions,
         pendingSituation: result.pendingSituation ?? null,
         usage: getGeminiUsageSummary(),
       });
@@ -169,6 +205,7 @@ async function startServer() {
         fromDayIndex?: number;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         controlStores?: string[];
         openCandidateIds?: string[];
         completedInvestigations?: Record<string, InvestigationResult>;
@@ -180,6 +217,7 @@ async function startServer() {
       const fromDayIndex = Math.max(0, typeof body.fromDayIndex === 'number' ? body.fromDayIndex : 0);
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
       const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
       const controlStores = new Set(Array.isArray(body.controlStores) ? body.controlStores : []);
       const clientOpenIds = Array.isArray(body.openCandidateIds)
         ? new Set(body.openCandidateIds)
@@ -205,6 +243,17 @@ async function startServer() {
           .filter((r) => r.reaction === 'approve' || r.reaction === 'dismiss')
           .map((r) => r.candidateId),
       );
+      const isClosedForEpisode = (candidateId: string, firstDetectedOn: string): boolean => {
+        if (candidateId.startsWith('situation:stock_running_out:')) {
+          return reactions.some(
+            (r) =>
+              r.candidateId === candidateId &&
+              (r.reaction === 'approve' || r.reaction === 'dismiss') &&
+              r.date >= firstDetectedOn,
+          );
+        }
+        return closedIdsAtFrom.has(candidateId);
+      };
       const deferredIdsAtFrom = new Set(
         reactions
           .filter((r) => r.reaction === 'not_now')
@@ -213,14 +262,13 @@ async function startServer() {
       const baseRaisedIds = new Set(baseState?.raised.map((r) => r.candidateId) ?? []);
       const baseLetGoGroupIds = new Set(baseState?.groupedLetGo.map((g) => g.id) ?? []);
 
-      // Detect Stage 1 raised candidates that Stage 2 Watcher is still "keep_watching" (not yet raised to user)
       const unraisedWatchIds = clientOpenIds
         ? new Set(
             (baseState?.raised ?? [])
               .filter(
                 (r) =>
                   !clientOpenIds.has(r.candidateId) &&
-                  !closedIdsAtFrom.has(r.candidateId) &&
+                  !isClosedForEpisode(r.candidateId, r.firstDetectedOn) &&
                   !deferredIdsAtFrom.has(r.candidateId) &&
                   !r.groundTruth?.startsWith('near_miss:'),
               )
@@ -233,6 +281,12 @@ async function startServer() {
         decisions,
         date: baseState?.date ?? timeline.sim.liveDates[0],
         handledRolloutIds: handledRollouts,
+      });
+      const prevAuto = evaluateAutonomyRecord({
+        date: baseState?.date ?? timeline.sim.liveDates[0],
+        decisions,
+        doneForYou: prevFollow.doneForYou,
+        autonomyReactions,
       });
 
       const latestByCandidate = new Map<string, CardReaction>();
@@ -257,14 +311,13 @@ async function startServer() {
         const ds = timeline.dayStates[i];
         const d = ds.date;
 
-        // 1. New situation raised that is not a near-miss / not already open or handled
         const hasNewMaterialRaise = ds.raised.some(
           (r) =>
-            !baseRaisedIds.has(r.candidateId) &&
-            !closedIdsAtFrom.has(r.candidateId) &&
+            (!baseRaisedIds.has(r.candidateId) ||
+              r.candidateId.startsWith('situation:stock_running_out:knitwear')) &&
+            !isClosedForEpisode(r.candidateId, r.firstDetectedOn) &&
             !r.groundTruth?.startsWith('near_miss:'),
         );
-        // 2. New distinct grouped let-go event (calendar or stock_returned)
         const hasNewLetGoGroup = ds.groupedLetGo.some(
           (g) =>
             !baseLetGoGroupIds.has(g.id) &&
@@ -276,14 +329,24 @@ async function startServer() {
           break;
         }
 
-        // 3. Follow-up milestones, checkpoints, completions, arrivals, or rollout cards
         const curFollow = evaluateActionsUpToDate({
           sim: timeline.sim,
           decisions,
           date: d,
           handledRolloutIds: handledRollouts,
         });
+        const curAuto = evaluateAutonomyRecord({
+          date: d,
+          decisions,
+          doneForYou: curFollow.doneForYou,
+          autonomyReactions,
+        });
+        const hasNewPendingOffer =
+          curAuto.offerCard?.status === 'pending' &&
+          prevAuto.offerCard?.id !== curAuto.offerCard?.id;
+
         if (
+          hasNewPendingOffer ||
           curFollow.traceEntries.some((t) => t.date === d) ||
           curFollow.doneForYou.length > prevFollow.doneForYou.length ||
           curFollow.rolloutCards.length > prevFollow.rolloutCards.length ||
@@ -293,7 +356,6 @@ async function startServer() {
           break;
         }
 
-        // 4. Deferred stock card losing sales for 3 days running
         if (latestDeferDate && d > latestDeferDate) {
           const recs = timeline.sim.storeRecordsByDate[d];
           const lostAny = Object.values(recs).some(
@@ -307,14 +369,13 @@ async function startServer() {
           }
         }
 
-        // 5. If Stage 2 Watcher kept watching an unclosed Stage 1 anomaly on `fromDayIndex`,
-        // check whether Stage 2 raises it on day `i` so Skip never jumps past e.g. Oct 3 Walnut Creek refunds
         if (unraisedWatchIds.size > 0 && ds.raised.some((r) => unraisedWatchIds.has(r.candidateId))) {
           const s2 = await evaluateStage2UpToDay({
             seed,
             targetDayIndex: i,
             decisions,
             reactions,
+            autonomyReactions,
             controlStores,
             investigateTargetDay: false,
             providedInvestigations: provided,
@@ -353,6 +414,7 @@ async function startServer() {
         candidateId: string;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
         builtTools?: BuiltToolRecord[];
         reviewedRefundIds?: string[];
@@ -362,6 +424,7 @@ async function startServer() {
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
       const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? [...body.autonomyReactions] : [];
       const provided = toInvestigationMap(body.completedInvestigations);
       const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
@@ -372,6 +435,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -442,6 +506,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions: updatedDecisions,
         reactions: updatedReactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -464,6 +529,144 @@ async function startServer() {
     }
   });
 
+  app.post('/api/autonomy/respond', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        offerId: string;
+        reaction: 'enable_autonomy' | 'keep_asking';
+        decisions?: ActionDecision[];
+        reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? body.decisions : [];
+      const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const priorAutoReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
+
+      const sim = runSimulation(seed, decisions);
+      const date = sim.liveDates[Math.max(0, Math.min(sim.liveDates.length - 1, dayIndex))];
+      const newReaction: AutonomyReaction = {
+        id: `auto:${body.offerId}:${date}:${priorAutoReactions.length}`,
+        offerId: body.offerId,
+        date,
+        dayIndex,
+        reaction: body.reaction,
+      };
+      const updatedAutoReactions = [...priorAutoReactions, newReaction];
+
+      const postStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions,
+        reactions,
+        autonomyReactions: updatedAutoReactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      res.json({
+        ok: true,
+        autonomyReaction: newReaction,
+        dayState: postStep.dayState,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  app.post('/api/action/undo', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        seed?: number;
+        dayIndex?: number;
+        decisionId: string;
+        decisions?: ActionDecision[];
+        reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
+        completedInvestigations?: Record<string, InvestigationResult>;
+        builtTools?: BuiltToolRecord[];
+        reviewedRefundIds?: string[];
+        builderTraceEntries?: TraceEntry[];
+      };
+      const seed = typeof body.seed === 'number' ? body.seed : DEFAULT_SEED;
+      const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
+      const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
+      const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
+      const provided = toInvestigationMap(body.completedInvestigations);
+      const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
+      const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
+      const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
+
+      const preSim = runSimulation(seed, decisions);
+      const date = preSim.liveDates[Math.max(0, Math.min(preSim.liveDates.length - 1, dayIndex))];
+      const recs = preSim.storeRecordsByDate[date];
+
+      const updatedDecisions = decisions.map((d) => {
+        if (d.id !== body.decisionId || d.undoneOnDate) return d;
+        const gid = d.groupId === 'knitwear' ? 'knitwear' : 'best_sellers';
+        const arrivalDate = d.arrivalDate ?? addDays(d.date, 2);
+        let returned = 0;
+        for (const line of d.transferLines ?? []) {
+          if (date < arrivalDate) {
+            returned += line.units;
+          } else {
+            const avail = recs?.[line.toStoreId]?.groups[gid]?.endingStock ?? 0;
+            returned += Math.min(avail, line.units);
+          }
+        }
+        return {
+          ...d,
+          undoneOnDate: date,
+          unitsReturned: Math.round(returned),
+        };
+      });
+
+      const postStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions: updatedDecisions,
+        reactions,
+        autonomyReactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+
+      res.json({
+        ok: true,
+        decisions: postStep.decisions,
+        dayState: postStep.dayState,
+        usage: getGeminiUsageSummary(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.post('/api/action/react', async (req, res) => {
     try {
       const body = (req.body ?? {}) as {
@@ -474,6 +677,7 @@ async function startServer() {
         reason?: DismissReason;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
         builtTools?: BuiltToolRecord[];
         reviewedRefundIds?: string[];
@@ -483,6 +687,7 @@ async function startServer() {
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
       const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
       const provided = toInvestigationMap(body.completedInvestigations);
       const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
@@ -505,6 +710,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions: updatedReactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -534,6 +740,7 @@ async function startServer() {
         candidateId: string;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
         builtTools?: BuiltToolRecord[];
         reviewedRefundIds?: string[];
@@ -543,6 +750,7 @@ async function startServer() {
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
       const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
       const provided = toInvestigationMap(body.completedInvestigations);
       const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
@@ -553,6 +761,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -579,6 +788,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -608,6 +818,7 @@ async function startServer() {
         candidateId: string;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
         builtTools?: BuiltToolRecord[];
         reviewedRefundIds?: string[];
@@ -617,6 +828,7 @@ async function startServer() {
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
       const reactions = Array.isArray(body.reactions) ? [...body.reactions] : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
       const provided = toInvestigationMap(body.completedInvestigations);
       const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
@@ -627,6 +839,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -665,6 +878,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions: updatedDecisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -933,6 +1147,9 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions: updatedReactions,
+        autonomyReactions: Array.isArray((req.body as { autonomyReactions?: AutonomyReaction[] })?.autonomyReactions)
+          ? (req.body as { autonomyReactions: AutonomyReaction[] }).autonomyReactions
+          : [],
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools: updatedTools,
@@ -965,6 +1182,7 @@ async function startServer() {
         toolId: string;
         decisions?: ActionDecision[];
         reactions?: CardReaction[];
+        autonomyReactions?: AutonomyReaction[];
         completedInvestigations?: Record<string, InvestigationResult>;
         builtTools?: BuiltToolRecord[];
         reviewedRefundIds?: string[];
@@ -974,6 +1192,7 @@ async function startServer() {
       const dayIndex = typeof body.dayIndex === 'number' ? body.dayIndex : 0;
       const decisions = Array.isArray(body.decisions) ? [...body.decisions] : [];
       const reactions = Array.isArray(body.reactions) ? body.reactions : [];
+      const autonomyReactions = Array.isArray(body.autonomyReactions) ? body.autonomyReactions : [];
       const provided = toInvestigationMap(body.completedInvestigations);
       const builtTools = Array.isArray(body.builtTools) ? body.builtTools : [];
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
@@ -984,6 +1203,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -1021,6 +1241,7 @@ async function startServer() {
         targetDayIndex: dayIndex,
         decisions: updatedDecisions,
         reactions,
+        autonomyReactions,
         investigateTargetDay: false,
         providedInvestigations: provided,
         builtTools,
@@ -1122,11 +1343,18 @@ async function startServer() {
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
       const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
 
+      const autonomyReactions = Array.isArray(
+        (req.body as { autonomyReactions?: AutonomyReaction[] })?.autonomyReactions,
+      )
+        ? (req.body as { autonomyReactions: AutonomyReaction[] }).autonomyReactions
+        : [];
+
       const preStep = await evaluateStage2UpToDay({
         seed,
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions,
         controlStores,
         investigateTargetDay: false,
         providedInvestigations: provided,
@@ -1160,13 +1388,22 @@ async function startServer() {
         },
       });
 
-      provided.set(targetSituation.candidateId, invResult);
+      const invKey =
+        targetSituation.detectorKind === 'stock_running_out' &&
+        targetSituation.groupId === 'knitwear' &&
+        targetSituation.stores?.length
+          ? `${targetSituation.candidateId}:${targetSituation.stores.map((s) => s.storeId).sort().join(',')}:${targetSituation.firstDetectedOn}`
+          : targetSituation.candidateId;
+      provided.set(invKey, invResult);
 
       const finalStep = await evaluateStage2UpToDay({
         seed,
         targetDayIndex: dayIndex,
         decisions,
         reactions,
+        autonomyReactions: Array.isArray((req.body as { autonomyReactions?: AutonomyReaction[] })?.autonomyReactions)
+          ? (req.body as { autonomyReactions: AutonomyReaction[] }).autonomyReactions
+          : [],
         controlStores,
         investigateTargetDay: false,
         providedInvestigations: provided,
@@ -1177,6 +1414,7 @@ async function startServer() {
 
       sendEvent('done', {
         investigation: invResult,
+        investigationKey: invKey,
         dayState: finalStep.dayState,
         usage: getGeminiUsageSummary(),
       });

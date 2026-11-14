@@ -7,9 +7,8 @@ import {
   DecisionAnswerResult,
   DecisionQuestionInput,
   formatGeminiError,
-  getApiKey,
   getUnavailableModelReason,
-  isCapReached,
+  isGeminiCallBlocked,
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
@@ -413,10 +412,9 @@ export async function evaluateWatcherBatch(params: {
   const questionCount = Object.keys(questions).length;
   const cfg = GEMINI_SETTINGS.jobs.watcher;
 
-  if (!getApiKey() || isCapReached(cfg.capBucket)) {
-    const notice = !getApiKey()
-      ? 'fallback, Gemini not used (no API key configured)'
-      : 'fallback, Gemini not used (daily decision call cap reached)';
+  const blockReason = isGeminiCallBlocked(cfg.capBucket);
+  if (blockReason) {
+    const notice = `fallback, Gemini not used (${blockReason})`;
     return buildCodeFallbackBatch(date, subjects, openSituations, briefing, notice);
   }
 

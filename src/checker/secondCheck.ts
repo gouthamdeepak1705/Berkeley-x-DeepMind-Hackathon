@@ -5,10 +5,9 @@ import { ESTABLISHED_STORES } from '../engine/stores';
 import {
   callInteractionRaw,
   formatGeminiError,
-  getApiKey,
   getUnavailableModelReason,
   InteractionStep,
-  isCapReached,
+  isGeminiCallBlocked,
   isModelUnavailableError,
   recordGeminiCall,
 } from '../gemini/client';
@@ -210,8 +209,9 @@ export async function runSecondCheck(params: {
   const { situation, sim, date, firstValueFact, bypassCache } = params;
   const cfg = GEMINI_SETTINGS.jobs.code_execution;
 
-  if (!getApiKey() || isCapReached(cfg.capBucket)) {
-    const reason = !getApiKey() ? 'No GEMINI_API_KEY configured' : 'Daily cap reached';
+  const blockReason = isGeminiCallBlocked(cfg.capBucket);
+  if (blockReason) {
+    const reason = blockReason;
     recordGeminiCall({
       feature: `second_check:${situation.candidateId}`,
       job: 'code_execution',
