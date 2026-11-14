@@ -76,7 +76,7 @@ export async function generateDayOneBriefWithGemini(baseBrief: DayOneBrief): Pro
 
   const basePrompt = [
     `Write a calm, clear three-paragraph Day One summary for the owner of ${baseBrief.businessName}, a California womenswear chain.`,
-    'Paragraph 1: store footprint (total stores, established locations open more than eighteen months, and newer openings Burlingame and Napa opening in late August).',
+    'Paragraph 1: store footprint (total stores, established locations open more than eighteen months, and newer openings: Burlingame opened in June, and Napa opening in late August).',
     'Paragraph 2: weekly and seasonal rhythm (Saturday weekend peak, December lift, August to early September summer lull).',
     'Paragraph 3: product group mix (Best-sellers, Knitwear, Everything else).',
     '',

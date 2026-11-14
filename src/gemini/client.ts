@@ -144,6 +144,7 @@ let cachedClientKey: string | undefined;
 const responseCache = new Map<string, unknown>();
 const unavailableModels = new Map<string, string>();
 const callRecords: GeminiCallRecord[] = [];
+let nextCallRecordSeq = 1;
 let currentCapDay = getUtcDayKey();
 let uncachedDecisionCount = 0;
 let uncachedOtherCount = 0;
@@ -228,7 +229,7 @@ export function recordGeminiCall(entry: Omit<GeminiCallRecord, 'id' | 'timestamp
       : 0;
   callRecords.push({
     ...entry,
-    id: `gcall:${Date.now()}:${callRecords.length}`,
+    id: `gcall:${Date.now()}:${nextCallRecordSeq++}`,
     timestamp: new Date().toISOString(),
     estimatedCostUsd: Math.round(cost * 1_000_000) / 1_000_000,
   });

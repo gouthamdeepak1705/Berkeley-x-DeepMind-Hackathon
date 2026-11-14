@@ -5,10 +5,30 @@ import {
   getMatchingPriorYearDate,
 } from '../engine/calendar';
 import { createFact } from '../engine/facts';
-import { SimulationRun } from '../engine/simulation';
+import { runSimulation, SimulationRun } from '../engine/simulation';
 import { ESTABLISHED_STORES, STORE_MAP, STORES } from '../engine/stores';
 import { InteractionToolDecl } from '../gemini/client';
-import { Fact, ProductGroupId, RaisedItem, StoreId } from '../types/domain';
+import { Fact, ProductGroupId, RaisedItem, RefundRecord, StoreId } from '../types/domain';
+
+const refundWindowCache = new Map<string, RefundRecord[]>();
+
+function getRefundsUpToDate(sim: SimulationRun, safeDate: string): RefundRecord[] {
+  const lastSimDate = sim.dates[sim.dates.length - 1];
+  if (safeDate >= lastSimDate || sim.walnutCreekRefunds.some((r) => r.date <= safeDate)) {
+    const windowStart = addDays(safeDate, -34);
+    const hasWindowCoverage = sim.walnutCreekRefunds.some((r) => r.date >= windowStart && r.date <= safeDate);
+    if (hasWindowCoverage && sim.walnutCreekRefunds[0]?.date <= windowStart) {
+      return sim.walnutCreekRefunds;
+    }
+  }
+  const cacheKey = `${sim.seed}:${safeDate}`;
+  let cached = refundWindowCache.get(cacheKey);
+  if (!cached) {
+    cached = runSimulation(sim.seed, [], safeDate).walnutCreekRefunds;
+    refundWindowCache.set(cacheKey, cached);
+  }
+  return cached;
+}
 
 export interface CheckerToolResult {
   toolName: string;
@@ -474,8 +494,9 @@ export function executeCheckerTool(
       }
       const medRate = median(otherRates);
 
-      // Detailed refund pattern breakdown strictly <= safeDate
-      const storeRefunds = sim.walnutCreekRefunds.filter(
+      // Detailed refund pattern breakdown strictly <= safeDate (35-day log ending safeDate)
+      const refundsAtDate = getRefundsUpToDate(sim, safeDate);
+      const storeRefunds = refundsAtDate.filter(
         (r) => r.storeId === storeId && r.date >= windowStart && r.date <= safeDate,
       );
       const after8CashUnlinked = storeRefunds.filter(
@@ -508,6 +529,13 @@ export function executeCheckerTool(
         'share_percent',
         `Unlinked cash refunds after 20:00 ($${Math.round(after8Sum).toLocaleString('en-US')}, ${op14Till2Count} transactions on Till 2, operator 14) as a share of total ${STORE_MAP[storeId].name} refunds up to ${safeDate}.`,
       );
+      const fOp14Count = createFact(
+        `tool:est:${storeId}:after8_op14_count:${safeDate}`,
+        'Till 2 operator 14 late unlinked cash refunds',
+        op14Till2Count,
+        'count',
+        `Number of unlinked cash refunds processed after 20:00 on Till 2 by operator 14 between ${windowStart} and ${safeDate}.`,
+      );
       const fExcessUsd = createFact(
         `tool:est:${storeId}:excess_refunds_wk:${safeDate}`,
         'Excess refunds per week above chain baseline',
@@ -519,9 +547,9 @@ export function executeCheckerTool(
       return {
         toolName,
         argsSummary: `store_id=${storeId}, metric=${metric}, window_days=${win}`,
-        facts: [fTarget, fMed, fAfter8, fExcessUsd],
+        facts: [fTarget, fMed, fAfter8, fOp14Count, fExcessUsd],
         payload: {
-          facts: [fTarget, fMed, fAfter8, fExcessUsd],
+          facts: [fTarget, fMed, fAfter8, fOp14Count, fExcessUsd],
           till_pattern_note:
             op14Till2Count > 0
               ? `Till 2, operator 14 logged ${op14Till2Count} unlinked cash refunds after 20:00 between ${windowStart} and ${safeDate}.`

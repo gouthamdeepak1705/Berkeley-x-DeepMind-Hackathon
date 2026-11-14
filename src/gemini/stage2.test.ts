@@ -76,6 +76,18 @@ test('all 8 Checker tools compute facts strictly <= date and surface donor stock
   const estYoy = mixOct15.facts.find((f) => f.id.startsWith('tool:mix:est_yoy:'))!;
   assert.ok(allYoy.value > 0, `Expected positive all-store YoY on Oct 15, got ${allYoy.value}`);
   assert.ok(estYoy.value < 0, `Expected negative established YoY on Oct 15, got ${estYoy.value}`);
+
+  // Refund log audit on Oct 3 must see Walnut Creek operator 14 Till 2 late unlinked cash refunds
+  const refOct3 = executeCheckerTool(
+    'compare_store_with_established',
+    { store_id: 'walnut_creek', metric: 'refund_rate', window_days: 28 },
+    sim,
+    '2026-10-03',
+  );
+  const after8Share = refOct3.facts.find((f) => f.id.includes(':after8_unlinked_cash:'))!;
+  const op14Count = refOct3.facts.find((f) => f.id.includes(':after8_op14_count:'))!;
+  assert.ok(after8Share.value > 20, `Expected after-8pm unlinked cash share > 20%, got ${after8Share.value}`);
+  assert.ok(op14Count.value > 10, `Expected Till 2 operator 14 count > 10, got ${op14Count.value}`);
 });
 
 test('Check 7: with GEMINI_API_KEY removed, run completes on Stage 1 code behaviour with fallbacks marked', async () => {

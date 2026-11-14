@@ -30,9 +30,9 @@ export function DayOneScreen({
   const paragraphs = brief.narrativeSegments;
 
   return (
-    <div className="min-h-screen bg-[#FAF8F5] text-[#171717] flex flex-col justify-center px-4 py-4 sm:px-8">
+    <div className="min-h-screen bg-[#FAF8F5] text-[#171717] flex flex-col justify-center px-4 py-3 sm:px-8">
       <main className="max-w-2xl w-full mx-auto">
-        <div className="flex items-baseline justify-between gap-4 border-b border-[#E6E1D8] pb-3.5">
+        <div className="flex items-baseline justify-between gap-4 border-b border-[#E6E1D8] pb-2.5">
           <div>
             <p className="text-sm font-medium text-[#78716C]">OpsCien Instinct</p>
             <h1 className="mt-0.5 font-display text-3xl font-semibold tracking-tight text-[#171717] text-balance">
@@ -48,7 +48,7 @@ export function DayOneScreen({
           </button>
         </div>
 
-        <section className="mt-4" aria-labelledby="business-summary-heading">
+        <section className="mt-3" aria-labelledby="business-summary-heading">
           <div className="flex items-baseline justify-between gap-2">
             <h2 id="business-summary-heading" className="text-sm font-semibold text-[#78716C]">
               What the numbers show so far
@@ -62,7 +62,7 @@ export function DayOneScreen({
             ) : null}
           </div>
 
-          <div className="mt-2 bg-white border border-[#E6E1D8] rounded-xl p-4 sm:p-5 space-y-2.5 text-[15px] leading-relaxed text-[#171717]">
+          <div className="mt-1.5 bg-white border border-[#E6E1D8] rounded-xl p-4 space-y-2 text-[14.5px] leading-relaxed text-[#171717]">
             {paragraphs && paragraphs.length > 0 ? (
               paragraphs.map((segs, idx) => (
                 <p key={`p-${idx}`}>{renderSegments(segs, onInspectFact)}</p>
@@ -99,26 +99,26 @@ export function DayOneScreen({
           </div>
         </section>
 
-        <section className="mt-4" aria-labelledby="confirmed-rules-heading">
+        <section className="mt-3" aria-labelledby="confirmed-rules-heading">
           <h2 id="confirmed-rules-heading" className="text-sm font-semibold text-[#78716C]">
             Confirmed starting rules
           </h2>
-          <div className="mt-2 bg-white border border-[#E6E1D8] rounded-xl divide-y divide-[#E6E1D8]">
+          <div className="mt-1.5 bg-white border border-[#E6E1D8] rounded-xl divide-y divide-[#E6E1D8]">
             {brief.confirmedRules.map((rule, index) => (
-              <div key={rule.id} className="px-5 py-2.5 flex items-baseline gap-4">
+              <div key={rule.id} className="px-4 py-2 flex items-baseline gap-3.5">
                 <span className="font-mono tabular-nums text-xs text-[#78716C] shrink-0">
                   0{index + 1}
                 </span>
                 <div>
                   <p className="text-sm font-semibold text-[#171717]">{rule.title}</p>
-                  <p className="mt-0.5 text-sm text-[#57534E]">{rule.detail}</p>
+                  <p className="text-[13px] text-[#57534E] leading-snug">{rule.detail}</p>
                 </div>
               </div>
             ))}
           </div>
         </section>
 
-        <div className="mt-5 flex items-center justify-between gap-4">
+        <div className="mt-4 flex items-center justify-between gap-4">
           <p className="text-sm text-[#57534E]">
             Live window begins 1 August 2026 and runs through 14 November 2026.
           </p>

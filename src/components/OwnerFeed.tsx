@@ -331,24 +331,42 @@ export function OwnerFeed({
                                     </span>
                                   </div>
                                   <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-                                    <span>
-                                      Actual:{' '}
-                                      <FactValue fact={ev.actual} onInspect={onInspectFact} />
-                                    </span>
-                                    <span>
-                                      Expected:{' '}
-                                      <FactValue fact={ev.expected} onInspect={onInspectFact} />
-                                    </span>
-                                    {ev.todayActual && ev.todayExpected && (
-                                      <span className="text-[#171717]">
-                                        Today:{' '}
-                                        <FactValue fact={ev.todayActual} onInspect={onInspectFact} />{' '}
-                                        vs{' '}
-                                        <FactValue
-                                          fact={ev.todayExpected}
-                                          onInspect={onInspectFact}
-                                        />
-                                      </span>
+                                    {ev.candidateId.startsWith('chain_total_note:') ? (
+                                      <>
+                                        <span>
+                                          Total 28d YoY:{' '}
+                                          <FactValue fact={ev.actual} onInspect={onInspectFact} />
+                                        </span>
+                                        <span>
+                                          LFL 28d vs exp:{' '}
+                                          <FactValue fact={ev.expected} onInspect={onInspectFact} />
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span>
+                                          Actual:{' '}
+                                          <FactValue fact={ev.actual} onInspect={onInspectFact} />
+                                        </span>
+                                        <span>
+                                          Expected:{' '}
+                                          <FactValue fact={ev.expected} onInspect={onInspectFact} />
+                                        </span>
+                                        {ev.todayActual && ev.todayExpected && (
+                                          <span className="text-[#171717]">
+                                            Today:{' '}
+                                            <FactValue
+                                              fact={ev.todayActual}
+                                              onInspect={onInspectFact}
+                                            />{' '}
+                                            vs{' '}
+                                            <FactValue
+                                              fact={ev.todayExpected}
+                                              onInspect={onInspectFact}
+                                            />
+                                          </span>
+                                        )}
+                                      </>
                                     )}
                                   </div>
                                 </li>
