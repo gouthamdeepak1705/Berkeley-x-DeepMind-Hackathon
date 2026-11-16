@@ -3,6 +3,7 @@
 @theme {
   --font-display: "Fraunces", Georgia, serif;
   --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-simple: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 
   --color-canvas: #FAF8F5;
@@ -32,4 +33,36 @@
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+.simple-shell {
+  background-color: #FFF8E8;
+  color: #25372C;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.simple-shell * {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+@keyframes simpleCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.simple-card-enter {
+  animation: simpleCardIn 220ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .simple-card-enter {
+    animation: none;
+  }
 }

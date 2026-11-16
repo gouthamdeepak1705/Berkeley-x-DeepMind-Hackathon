@@ -12,6 +12,12 @@ import {
   getGeminiUsageSummary,
 } from '../gemini/client';
 import { executeActionThroughGateway, getGatewayAttemptLog } from '../gateway/gateway';
+import {
+  attachDoneForYouProofBars,
+  buildMoneyAccountData,
+  buildStoreBoard,
+  computeCardVisualMetrics,
+} from '../money/account';
 import { buildEndStatement } from '../statement/statement';
 import { evaluateWatcherBatch, WatcherSubjectOutcome } from '../watcher/watcher';
 import { WatcherSubject } from '../watcher/briefing';
@@ -521,6 +527,8 @@ interface TimelineLoopSnapshot {
   emittedFollowUpIds: Set<string>;
   lookedUpInvKeys: Set<string>;
   hadPendingTarget: boolean;
+  signalsCheckedCount: number;
+  askedOwnerKeys: Set<string>;
   decisions: ActionDecision[];
 }
 
@@ -612,6 +620,8 @@ function cloneSnapshot(snap: TimelineLoopSnapshot): TimelineLoopSnapshot {
     emittedFollowUpIds: new Set(snap.emittedFollowUpIds),
     lookedUpInvKeys: new Set(snap.lookedUpInvKeys),
     hadPendingTarget: snap.hadPendingTarget,
+    signalsCheckedCount: snap.signalsCheckedCount ?? 0,
+    askedOwnerKeys: new Set(snap.askedOwnerKeys ?? []),
     decisions: snap.decisions.map((d) => ({
       ...d,
       transferLines: d.transferLines ? d.transferLines.map((l) => ({ ...l })) : undefined,
@@ -773,6 +783,8 @@ export async function evaluateStage2UpToDay(params: {
   let lastTodayCandidates: Candidate[] = [];
   let emittedFollowUpIds = new Set<string>();
   const lookedUpInvKeys = new Set<string>();
+  let signalsCheckedCount = 0;
+  let askedOwnerKeys = new Set<string>();
 
   for (let probe = clampedTarget; probe >= 0; probe--) {
     const snap = cacheBucket.get(probe);
@@ -811,6 +823,8 @@ export async function evaluateStage2UpToDay(params: {
     }
     lastTodayCandidates = cloned.lastTodayCandidates;
     emittedFollowUpIds = cloned.emittedFollowUpIds;
+    signalsCheckedCount = cloned.signalsCheckedCount;
+    askedOwnerKeys = cloned.askedOwnerKeys;
     for (const ik of cloned.lookedUpInvKeys) lookedUpInvKeys.add(ik);
     const existingDecisionIds = new Set(decisions.map((d) => d.id));
     const mergedFromSnap = cloned.decisions.filter((d) => !existingDecisionIds.has(d.id));
@@ -877,6 +891,7 @@ export async function evaluateStage2UpToDay(params: {
     const todayCandidates = rawCandidates.map((rc) =>
       applySilenceChecks(rc, sim, date, decisions, effectiveControlStores),
     );
+    signalsCheckedCount += todayCandidates.length;
     if (i === clampedTarget) {
       lastTodayCandidates = todayCandidates;
     }
@@ -1843,6 +1858,15 @@ export async function evaluateStage2UpToDay(params: {
       }
     }
 
+    for (const sitKey of openSituations.keys()) {
+      if (!deferredSituations.has(sitKey) && !approvedSituations.has(sitKey) && !dismissedSituations.has(sitKey)) {
+        askedOwnerKeys.add(sitKey);
+      }
+    }
+    for (const rc of dayFollowUp.rolloutCards) {
+      askedOwnerKeys.add(rc.candidateId);
+    }
+
     const isPendingOnThisDay = Boolean(pendingSituation && i === clampedTarget);
     cacheBucket.set(
       i,
@@ -1866,6 +1890,8 @@ export async function evaluateStage2UpToDay(params: {
         emittedFollowUpIds,
         lookedUpInvKeys,
         hadPendingTarget: isPendingOnThisDay,
+        signalsCheckedCount,
+        askedOwnerKeys,
         decisions,
       }),
     );
@@ -1998,6 +2024,77 @@ export async function evaluateStage2UpToDay(params: {
     autonomyReactions,
   });
 
+  for (const r of reactions) {
+    if (r.date <= targetDate) {
+      askedOwnerKeys.add(`${r.candidateId}:${r.date}`);
+    }
+  }
+  for (const ar of autonomyReactions) {
+    if (ar.date <= targetDate) {
+      askedOwnerKeys.add(`autonomy:${ar.offerId}`);
+    }
+  }
+  for (const r of raisedSnapshot) {
+    const hasSameDayReaction = reactions.some(
+      (rx) => rx.candidateId === r.candidateId && rx.date === r.firstDetectedOn,
+    );
+    if (!hasSameDayReaction) {
+      askedOwnerKeys.add(`${r.candidateId}:${r.firstDetectedOn}`);
+    }
+  }
+  if (autonomyRecord.offerCard) {
+    askedOwnerKeys.add(`autonomy:${autonomyRecord.offerCard.id}`);
+  }
+
+  const dismissedStockObj: Record<string, string[]> = {};
+  for (const [k, s] of dismissedStockStores.entries()) {
+    dismissedStockObj[k] = Array.from(s);
+  }
+
+  const enrichedRaisedSnapshot = raisedSnapshot.map((item) => ({
+    ...item,
+    visualMetrics: computeCardVisualMetrics({
+      sim,
+      date: targetDate,
+      item,
+      decisions,
+      doneForYou: finalFollowUp.doneForYou,
+    }),
+  }));
+
+  const moneyAccount = buildMoneyAccountData({
+    seed,
+    sim,
+    date: targetDate,
+    raised: enrichedRaisedSnapshot,
+    decisions,
+    reactions,
+    autonomyReactions,
+    doneForYou: finalFollowUp.doneForYou,
+    noticedAndLetGo: noticedList,
+    builtTools: visibleBuiltTools,
+    watcherEvalLog,
+    dismissedStockStores: dismissedStockObj,
+    signalsCheckedCount,
+    askedOwnerCount: askedOwnerKeys.size,
+  });
+
+  const storeBoard = buildStoreBoard({
+    sim,
+    date: targetDate,
+    raised: enrichedRaisedSnapshot,
+    decisions,
+    doneForYou: finalFollowUp.doneForYou,
+    activeControlStores: finalFollowUp.activeControlStores,
+    moneyAccount,
+  });
+
+  const doneForYouProofBars = attachDoneForYouProofBars({
+    sim,
+    doneForYou: finalFollowUp.doneForYou,
+    decisions,
+  });
+
   const isFinalDay = clampedTarget === sim.liveDates.length - 1;
   const geminiUsage = getGeminiUsageSummary();
   const endStatement = isFinalDay
@@ -2027,7 +2124,7 @@ export async function evaluateStage2UpToDay(params: {
       totalDays: sim.liveDates.length,
       chartPoints,
       headlineFacts,
-      raised: raisedSnapshot,
+      raised: enrichedRaisedSnapshot,
       inProgress: finalFollowUp.inProgress,
       doneForYou: finalFollowUp.doneForYou,
       noticedAndLetGo: noticedList,
@@ -2047,6 +2144,9 @@ export async function evaluateStage2UpToDay(params: {
       endStatement,
       geminiMode: getGeminiPlaybackMode(),
       geminiCapBanner: getGeminiCapBanner() ?? undefined,
+      moneyAccount,
+      storeBoard,
+      doneForYouProofBars,
     },
     sim,
     pendingSituation,

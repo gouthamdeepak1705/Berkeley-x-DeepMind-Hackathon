@@ -76,7 +76,7 @@ export function selectNextWatchDemoBeat(params: {
       return {
         id: key,
         caption:
-          'Three small stock moves worked out of three, with one proven against a held-out store; agreeing to let OpsCien act alone under 500 units.',
+          'Three small stock moves worked out of three, with one proven against a held-out store; agreeing to let Opscien act alone under 500 units.',
         highlight: { actionKey: 'autonomy_yes', label: 'Yes, within those limits' },
         action: { type: 'accept_autonomy', offerId: offer.id },
       };
@@ -171,7 +171,7 @@ export function selectWatchCaptionForDay(dayState: DayState): string {
     (d) => d.isAutonomous && d.approvedOn === dayState.date,
   );
   if (latestAuto) {
-    return `${latestAuto.title} stayed within your 500-unit rule, so OpsCien acted automatically and logged it under Done for you.`;
+    return `${latestAuto.title} stayed within your 500-unit rule, so Opscien acted automatically and logged it under Done for you.`;
   }
   if (dayState.date >= '2026-08-01' && dayState.date <= '2026-09-07') {
     return 'Watching daily trading through August and the Labor Day weekend while letting seasonal noise pass quietly.';

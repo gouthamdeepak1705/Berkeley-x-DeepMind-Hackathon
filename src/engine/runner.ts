@@ -14,6 +14,7 @@ import {
   SupportingEvidence,
   TraceEntry,
 } from '../types/domain';
+import { buildMoneyAccountData, buildStoreBoard } from '../money/account';
 import {
   addDays,
   diffDays,
@@ -770,6 +771,38 @@ export function buildLiveTimeline(
       }))
       .reverse();
 
+    const dayGroupedLetGo = buildGroupedLetGo(noticedList);
+    const dayMoneyAccount =
+      i === 0
+        ? buildMoneyAccountData({
+            seed,
+            sim,
+            date,
+            raised: raisedSnapshot,
+            decisions,
+            reactions: [],
+            autonomyReactions: [],
+            doneForYou: [],
+            noticedAndLetGo: noticedList,
+            builtTools: [],
+            watcherEvalLog: [],
+            signalsCheckedCount: todayCandidates.length,
+            askedOwnerCount: raisedSnapshot.length,
+          })
+        : undefined;
+    const dayStoreBoard =
+      i === 0 && dayMoneyAccount
+        ? buildStoreBoard({
+            sim,
+            date,
+            raised: raisedSnapshot,
+            decisions,
+            doneForYou: [],
+            activeControlStores: controlStores,
+            moneyAccount: dayMoneyAccount,
+          })
+        : undefined;
+
     dayStates.push({
       date,
       dayIndex: i,
@@ -778,9 +811,11 @@ export function buildLiveTimeline(
       headlineFacts,
       raised: raisedSnapshot,
       noticedAndLetGo: noticedList,
-      groupedLetGo: buildGroupedLetGo(noticedList),
+      groupedLetGo: dayGroupedLetGo,
       trace: allTrace.slice().reverse(),
       todayCandidates,
+      moneyAccount: dayMoneyAccount,
+      storeBoard: dayStoreBoard,
     });
   }
 

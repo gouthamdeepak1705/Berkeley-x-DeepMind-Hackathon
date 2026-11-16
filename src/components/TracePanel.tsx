@@ -133,7 +133,7 @@ export function TracePanel({
             Behind the screen
           </h2>
           <p className="mt-0.5 text-xs text-[#78716C]">
-            How OpsCien decides, checks its work, and builds tools. Tap any line for detail.
+            How Opscien decides, checks its work, and builds tools. Tap any line for detail.
           </p>
         </div>
 

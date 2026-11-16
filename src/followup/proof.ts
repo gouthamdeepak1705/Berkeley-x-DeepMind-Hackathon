@@ -232,12 +232,13 @@ export function evaluateActionsUpToDate(params: {
     const holdoutId = decision.holdoutStoreId;
     const holdoutName = holdoutId ? STORE_MAP[holdoutId].name : undefined;
 
+    const formattedMovedUnits = totalMovedUnits.toLocaleString('en-US');
     const movedUnitsFact = createFact(
       `dfy:${decision.id}:units`,
       'Units moved',
       totalMovedUnits,
       'units',
-      `Moved ${totalMovedUnits} ${grpLabel} units from ${fromStoreNames} to ${toStoreNames} on ${formatShortDate(decision.date)}.`,
+      `Moved ${formattedMovedUnits} ${grpLabel} units from ${fromStoreNames} to ${toStoreNames} on ${formatShortDate(decision.date)}.`,
     );
     const expectedWorthUsd =
       decision.expectedWorthUsd ??
@@ -252,7 +253,7 @@ export function evaluateActionsUpToDate(params: {
       'USD',
       `Estimated weekly ${grpLabel} demand protected at ${toStoreNames} from this transfer.`,
     );
-    const movedSummary = `Moved ${totalMovedUnits} ${grpLabel} units from ${fromStoreNames} to ${toStoreNames} (arriving ${formatShortDate(arrivalDate)}).`;
+    const movedSummary = `Moved ${formattedMovedUnits} ${grpLabel} units from ${fromStoreNames} to ${toStoreNames} (arriving ${formatShortDate(arrivalDate)}).`;
     const whySummary =
       decision.whySummary ??
       (decision.isAutonomous
@@ -269,7 +270,7 @@ export function evaluateActionsUpToDate(params: {
         'Unsold units moved back',
         returnedUnits,
         'units',
-        `On ${formatShortDate(decision.undoneOnDate)}, ${returnedUnits} unsold ${grpLabel} units were returned from ${toStoreNames} to ${fromStoreNames}.`,
+        `On ${formatShortDate(decision.undoneOnDate)}, ${returnedUnits.toLocaleString('en-US')} unsold ${grpLabel} units were returned from ${toStoreNames} to ${fromStoreNames}.`,
       );
       doneForYou.push({
         decisionId: decision.id,

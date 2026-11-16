@@ -355,6 +355,149 @@ export interface RaisedItem {
   costOfDelayFact?: Fact;
   isRollout?: boolean;
   parentDecisionId?: string;
+  visualMetrics?: CardVisualMetrics;
+}
+
+export type ProofTag = 'proven' | 'likely' | 'mixed' | 'none';
+
+export interface MoneyStoreProblemRow {
+  storeId: StoreId;
+  storeName: string;
+  problemId: string;
+  problemTitle: string;
+  withoutOpscienFact: Fact;
+  lostSoFarFact: Fact;
+  savedFact: Fact;
+  proofStatus: ProofTag;
+  proofNote: string;
+  lossReason: string;
+}
+
+export interface MoneyProblemBreakdown {
+  problemId: string;
+  title: string;
+  storeNames: string;
+  statusLabel: string;
+  decisionLabel: string;
+  withoutOpscienFact: Fact;
+  lostSoFarFact: Fact;
+  savedFact: Fact;
+  savedProvenUsd: number;
+  savedLikelyUsd: number;
+  proofStatus: ProofTag;
+  proofNote: string;
+  lossReason: string;
+  stores: MoneyStoreProblemRow[];
+}
+
+export interface MoneyStoreBreakdown {
+  storeId: StoreId;
+  storeName: string;
+  withoutOpscienFact: Fact;
+  lostSoFarFact: Fact;
+  savedFact: Fact;
+  proofStatus: ProofTag;
+  lossReason: string;
+}
+
+export interface TurnedDownWarningItem {
+  candidateId: string;
+  title: string;
+  reaction: 'not_now' | 'dismiss';
+  reactionDate: string;
+  dismissReasonLabel?: string;
+  isReRaised: boolean;
+  weeklyStakeFact: Fact;
+  lostSinceTurnedDownFact: Fact;
+  byStore: Array<{
+    storeId: StoreId;
+    storeName: string;
+    lostFact: Fact;
+  }>;
+}
+
+export interface WorkCountersData {
+  signalsCheckedFact: Fact;
+  stayedQuietFact: Fact;
+  askedOwnerFact: Fact;
+  actedAloneFact: Fact;
+  unitsMovedFact: Fact;
+  toolsBuiltFact: Fact;
+}
+
+export interface MoneyAccountData {
+  asOfDate: string;
+  withoutOpscienFact: Fact;
+  lostSoFarFact: Fact;
+  savedSoFarFact: Fact;
+  savedProvenFact: Fact;
+  savedLikelyFact: Fact;
+  atRiskNowFact: Fact;
+  byProblem: MoneyProblemBreakdown[];
+  byStore: MoneyStoreBreakdown[];
+  turnedDownWarnings: TurnedDownWarningItem[];
+  workCounters: WorkCountersData;
+}
+
+export interface CardVisualMetrics {
+  daysOfStockLeftFact?: Fact;
+  daysUntilDeliveryFact?: Fact;
+  emptyShelfDaysFact?: Fact;
+  doNothingLossFact?: Fact;
+  currentCoverFact?: Fact;
+  alarmCoverFact?: Fact;
+  proofBarData?: {
+    treatedNames: string;
+    holdoutName: string;
+    treatedActualSalesFact: Fact;
+    treatedExpectedSalesFact: Fact;
+    holdoutActualSalesFact: Fact;
+    holdoutExpectedSalesFact: Fact;
+    treatedPctFact: Fact;
+    holdoutPctFact: Fact;
+  };
+  refundStoreComparison?: Array<{
+    storeId: StoreId;
+    storeName: string;
+    refundRateFact: Fact;
+    isFlagged: boolean;
+  }>;
+}
+
+export type StoreBoardStatus =
+  | 'not_open'
+  | 'losing_sales'
+  | 'held_back'
+  | 'stock_on_the_way'
+  | 'at_risk'
+  | 'fine';
+
+export interface StoreBoardEntry {
+  storeId: StoreId;
+  storeName: string;
+  baseDailySales: number;
+  isOpen: boolean;
+  openedDate: string;
+  status: StoreBoardStatus;
+  statusLabel: string;
+  bestSellersCoverFact: Fact | null;
+  knitwearCoverFact: Fact | null;
+  sales7dActualFact: Fact;
+  sales7dExpectedFact: Fact;
+  sales28dActualFact: Fact;
+  sales28dExpectedFact: Fact;
+  salesVsExpectedPctFact: Fact;
+  savedSoFarFact: Fact;
+  lostSoFarFact: Fact;
+  chartPoints: Array<{
+    date: string;
+    actual7d: number;
+    expected7d: number;
+  }>;
+  events: Array<{
+    date: string;
+    summary: string;
+  }>;
 }
 
 export type TraceLane = 'manager' | 'data_scientist' | 'developer';
@@ -702,6 +845,9 @@ export interface DayState {
   endStatement?: EndStatementData;
   geminiMode?: 'replay' | 'live';
   geminiCapBanner?: string;
+  moneyAccount?: MoneyAccountData;
+  storeBoard?: StoreBoardEntry[];
+  doneForYouProofBars?: Record<string, CardVisualMetrics['proofBarData']>;
 }
 
 export interface DiagnosticTargetResult {

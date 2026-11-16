@@ -1081,9 +1081,13 @@ export function OwnerFeed({
           <ul className="mt-2 space-y-2">
             {visibleLetGo.map((group) => {
               const isOpen = !!openLetGoGroupIds[group.id];
-              const storeNames = group.items
-                .map((it) => it.storeName)
-                .filter((name): name is string => !!name);
+              const storeNames = Array.from(
+                new Set(
+                  group.items
+                    .map((it) => it.storeName)
+                    .filter((name): name is string => !!name),
+                ),
+              );
 
               return (
                 <li

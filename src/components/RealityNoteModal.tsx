@@ -46,6 +46,12 @@ export function RealityNoteModal({ open, onClose }: RealityNoteModalProps) {
             deterministic code; tapping any figure shows its ID, unit, and formula.
           </p>
           <p>
+            <strong className="font-semibold text-[#171717]">With and without Opscien:</strong>{' '}
+            Saved and lost dollar totals compare your decisions day by day against a second run
+            of the exact same seed where no action is taken. No future days after the date on screen
+            are ever included.
+          </p>
+          <p>
             <strong className="font-semibold text-[#171717]">One gateway &amp; isolated builder:</strong>{' '}
             Every action passes through one code gateway enforcing safety limits and cover floors.
             Built store tools run inside an isolated browser container with strict CSP rules and must

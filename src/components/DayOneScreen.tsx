@@ -42,7 +42,7 @@ export function DayOneScreen({
       <main className="max-w-2xl w-full mx-auto">
         <div className="flex flex-wrap items-baseline justify-between gap-3 border-b border-[#E6E1D8] pb-3">
           <div>
-            <p className="text-sm font-medium text-[#78716C]">OpsCien Instinct</p>
+            <p className="text-sm font-medium text-[#78716C]">Opscien Instinct</p>
             <h1 className="mt-0.5 font-display text-2xl sm:text-3xl font-semibold tracking-tight text-[#171717] text-balance">
               Day one: {brief.businessName}
             </h1>
