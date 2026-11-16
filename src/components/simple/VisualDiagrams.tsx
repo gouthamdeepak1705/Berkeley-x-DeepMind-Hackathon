@@ -1,4 +1,4 @@
-import { ArrowRight } from 'lucide-react';
+import { ArrowDown, ArrowRight } from 'lucide-react';
 import { formatShortDate } from '../../engine/calendar';
 import { CardVisualMetrics, Fact, TransferPlan } from '../../types/domain';
 import { FactValue } from '../FactValue';
@@ -102,25 +102,26 @@ export function TransferFlowVisual({
 
   return (
     <div className="p-3.5 rounded-xl bg-[#F7FAF7] border border-[#CFE0D4] space-y-2.5 text-xs">
-      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] items-stretch sm:items-center gap-2.5">
         <div className="space-y-1">
           <p className="text-[#56695D] font-medium">Stores with spare stock</p>
           <ul className="space-y-1">
             {Array.from(fromTotals.entries()).map(([name, units]) => (
               <li
                 key={`from-${name}`}
-                className="px-2.5 py-1.5 rounded-lg bg-white border border-[#DCE6DF] flex items-center justify-between gap-1.5"
+                className="px-2.5 py-1.5 rounded-lg bg-white border border-[#DCE6DF] flex items-center justify-between gap-2"
               >
-                <span className="font-medium text-[#25372C] truncate">{name}</span>
+                <span className="font-medium text-[#25372C] sm:truncate">{name}</span>
                 <span className="text-[#56695D] shrink-0">-{units.toLocaleString('en-US')}</span>
               </li>
             ))}
           </ul>
         </div>
 
-        <div className="flex flex-col items-center justify-center px-1 text-center">
-          <ArrowRight className="w-4 h-4 text-[#25372C]" />
-          <span className="mt-1 font-semibold text-[#25372C]">
+        <div className="flex flex-row sm:flex-col items-center justify-center gap-2 sm:gap-0 px-1 py-1 sm:py-0 text-center">
+          <ArrowRight className="hidden sm:block w-4 h-4 text-[#25372C]" />
+          <ArrowDown className="sm:hidden w-4 h-4 text-[#25372C]" />
+          <span className="sm:mt-1 font-semibold text-[#25372C]">
             <FactValue fact={plan.totalUnitsFact} onInspect={onInspectFact} noPlus plainFont />
           </span>
           <span className="text-[11px] text-[#56695D]">
@@ -134,17 +135,17 @@ export function TransferFlowVisual({
             {Array.from(toTotals.entries()).map(([name, units]) => (
               <li
                 key={`to-${name}`}
-                className="px-2.5 py-1.5 rounded-lg bg-white border border-[#B7D7C1] flex items-center justify-between gap-1.5"
+                className="px-2.5 py-1.5 rounded-lg bg-white border border-[#B7D7C1] flex items-center justify-between gap-2"
               >
-                <span className="font-medium text-[#25372C] truncate">{name}</span>
+                <span className="font-medium text-[#25372C] sm:truncate">{name}</span>
                 <span className="font-semibold text-[#15803D] shrink-0">
                   +{units.toLocaleString('en-US')}
                 </span>
               </li>
             ))}
             {plan.holdoutStoreName && (
-              <li className="px-2.5 py-1.5 rounded-lg bg-[#FFF8E8] border border-dashed border-[#B7AE97] flex items-center justify-between gap-1.5">
-                <span className="font-medium text-[#43564A] truncate">
+              <li className="px-2.5 py-1.5 rounded-lg bg-[#FFF8E8] border border-dashed border-[#B7AE97] flex items-center justify-between gap-2">
+                <span className="font-medium text-[#43564A] sm:truncate">
                   {plan.holdoutStoreName}
                 </span>
                 <span className="text-[11px] text-[#56695D] shrink-0">Held back</span>
@@ -250,7 +251,9 @@ export function RefundComparisonVisual({
   return (
     <div className="p-3.5 rounded-xl bg-[#FFFDF7] border border-[#E7DEC8] space-y-3 text-xs">
       <div className="space-y-1.5">
-        <p className="font-medium text-[#25372C]">Cash refund rate across established stores</p>
+        <p className="font-medium text-[#25372C]">
+          Cash refund rate across stores open more than 18 months
+        </p>
         <div className="space-y-1.5">
           {rows.map((row) => {
             const width = Math.min(100, Math.max(6, (row.refundRateFact.value / maxRate) * 100));

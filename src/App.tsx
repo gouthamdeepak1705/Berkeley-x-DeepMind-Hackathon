@@ -15,14 +15,17 @@ import {
 import { RealityNoteModal } from './components/RealityNoteModal';
 import { SalesChart } from './components/SalesChart';
 import { GeminiTelemetrySnapshot, TracePanel } from './components/TracePanel';
+import { DayByDayChartCard } from './components/simple/DayByDayChartCard';
 import { LiveWorkingBanner, toSimpleEnglish } from './components/simple/SimpleHelpers';
 import { MoneyBar } from './components/simple/MoneyBar';
 import { SimpleOwnerFeed } from './components/simple/SimpleOwnerFeed';
 import { SimpleResultPage } from './components/simple/SimpleResultPage';
 import { SimpleTopBar } from './components/simple/SimpleTopBar';
 import { StoreBoard } from './components/simple/StoreBoard';
+import { TeamPanel } from './components/simple/TeamPanel';
 import { TourOverlay } from './components/simple/TourOverlay';
 import { AboutBusinessModal, WelcomeScreen } from './components/simple/WelcomeScreen';
+import { diffDays, LIVE_START_DATE } from './engine/calendar';
 import {
   computeCalmStatusLine,
   selectNextWatchDemoBeat,
@@ -79,6 +82,7 @@ export default function App() {
   const [started, setStarted] = useState<boolean>(isAutostart);
   const [runMode, setRunMode] = useState<'drive' | 'watch' | 'tour'>('drive');
   const [tourStep, setTourStep] = useState<number>(1);
+  const [chartTab, setChartTab] = useState<'sales' | 'money'>('sales');
   const [showAboutModal, setShowAboutModal] = useState<boolean>(false);
   const [liveSlow, setLiveSlow] = useState<boolean>(false);
   const [dayOneBrief, setDayOneBrief] = useState<DayOneBrief>(baseTimeline.sim.dayOneBrief);
@@ -236,11 +240,65 @@ export default function App() {
       setLiveSlow(false);
       return;
     }
-    const timer = window.setTimeout(() => {
-      setLiveSlow(true);
-    }, 1200);
-    return () => window.clearTimeout(timer);
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/gemini/live-status');
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { liveCallsInFlight?: number };
+        if (!cancelled) {
+          setLiveSlow((data.liveCallsInFlight ?? 0) > 0);
+        }
+      } catch {
+        // Keep current banner state on transient error
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, 600);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [requestInFlight, activeInvestigation]);
+
+  useEffect(() => {
+    if (
+      !started ||
+      showTechnicalDetail ||
+      runMode !== 'tour' ||
+      requestInFlight ||
+      activeInvestigation
+    ) {
+      return;
+    }
+    const stop = getTourStop(tourStep);
+    const raf = window.requestAnimationFrame(() => {
+      const target = document.querySelector(`[data-tour-target="${stop.scrollTarget}"]`);
+      if (target instanceof HTMLElement) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [
+    started,
+    showTechnicalDetail,
+    runMode,
+    tourStep,
+    requestInFlight,
+    activeInvestigation,
+    dayIndex,
+  ]);
+
+  useEffect(() => {
+    if (runMode !== 'tour') return;
+    if (tourStep === 1 || tourStep === 2) {
+      setChartTab('sales');
+    } else if (tourStep === 4 || tourStep === 8) {
+      setChartTab('money');
+    }
+  }, [runMode, tourStep]);
 
   const streamInvestigation = useCallback(
     async (targetDayIdx: number, pending: RaisedItem, wasPlaying: boolean, seq: number) => {
@@ -453,6 +511,7 @@ export default function App() {
     setDemoHighlight(null);
     setDemoCaption(null);
     setTourStep(1);
+    setChartTab('sales');
     resumeAfterInvestigationRef.current = false;
 
     decisionsRef.current = [];
@@ -722,7 +781,7 @@ export default function App() {
         });
         setBuilderProgressByCandidate((prev) => ({
           ...prev,
-          [candidateId]: 'Writing single-file tool with Gemini...',
+          [candidateId]: 'Writing single-file store refund desk...',
         }));
 
         try {
@@ -783,7 +842,7 @@ export default function App() {
             repairReason = suite.failureReasons.join(' | ');
             setBuilderProgressByCandidate((prev) => ({
               ...prev,
-              [candidateId]: 'First check failed. Asking Gemini to repair once...',
+              [candidateId]: 'First check failed. Repairing once and retesting...',
             }));
 
             const repairRes = await fetch('/api/builder/repair', {
@@ -1098,27 +1157,54 @@ export default function App() {
             if (data.usage) syncUsageMeta(data.usage as UsageBannerState);
           }
         }
-      } else if (stop.actionKind === 'approve_wc_knitwear') {
-        const card = currentDayState.raised.find(
-          (r) => r.candidateId === 'situation:stock_running_out:knitwear',
-        );
-        if (card) {
-          const res = await fetch('/api/action/approve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...commonStatePayload(),
-              dayIndex: dayIndexRef.current,
-              candidateId: card.candidateId,
-            }),
-          });
-          const data = await res.json();
-          if (seq !== requestSeqRef.current || !isMountedRef.current) return;
-          if (res.ok && data.ok) {
-            if (data.decision) decisionsRef.current = [...decisionsRef.current, data.decision];
-            if (data.reaction) reactionsRef.current = [...reactionsRef.current, data.reaction];
-            if (data.dayState) applyDayState(data.dayState as DayState);
-            if (data.usage) syncUsageMeta(data.usage as UsageBannerState);
+      } else if (stop.actionKind === 'approve_wc_knitwear_and_advance') {
+        // Silently step to 2026-09-25, approve Walnut Creek knitwear, then advance to 2026-09-27
+        const wcDayIdx = diffDays(LIVE_START_DATE, '2026-09-25');
+        const stepRes = await fetch('/api/timeline/step', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...commonStatePayload(),
+            dayIndex: wcDayIdx,
+            controlStores: [],
+            investigateTargetDay: true,
+          }),
+        });
+        const stepData = await stepRes.json();
+        if (seq !== requestSeqRef.current || !isMountedRef.current) return;
+        if (stepRes.ok && stepData.dayState) {
+          if (Array.isArray(stepData.decisions)) {
+            decisionsRef.current = stepData.decisions as ActionDecision[];
+          }
+          const wcState = stepData.dayState as DayState;
+          applyDayState(wcState);
+          if (stepData.usage) syncUsageMeta(stepData.usage as UsageBannerState);
+
+          const kwCard = wcState.raised.find(
+            (r) => r.candidateId === 'situation:stock_running_out:knitwear',
+          );
+          if (kwCard) {
+            const appRes = await fetch('/api/action/approve', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ...commonStatePayload(),
+                dayIndex: wcDayIdx,
+                candidateId: kwCard.candidateId,
+              }),
+            });
+            const appData = await appRes.json();
+            if (seq !== requestSeqRef.current || !isMountedRef.current) return;
+            if (appRes.ok && appData.ok) {
+              if (appData.decision) {
+                decisionsRef.current = [...decisionsRef.current, appData.decision as ActionDecision];
+              }
+              if (appData.reaction) {
+                reactionsRef.current = [...reactionsRef.current, appData.reaction as CardReaction];
+              }
+              if (appData.dayState) applyDayState(appData.dayState as DayState);
+              if (appData.usage) syncUsageMeta(appData.usage as UsageBannerState);
+            }
           }
         }
       } else if (stop.actionKind === 'approve_rollout') {
@@ -1142,15 +1228,15 @@ export default function App() {
             if (data.usage) syncUsageMeta(data.usage as UsageBannerState);
           }
         }
-      } else if (stop.actionKind === 'build_and_switch_refunds') {
+      } else if (stop.actionKind === 'build_refund_tool') {
         const refundCard = currentDayState.raised.find(
           (r) => r.investigation?.outcomeKind === 'tool_to_build',
         );
-        let builtTool = (currentDayState.builtTools ?? []).find(
+        const existingTool = (currentDayState.builtTools ?? []).find(
           (t) => t.id === 'tool:refund_exceptions_desk:walnut_creek',
         );
 
-        if (refundCard && !builtTool) {
+        if (refundCard && !existingTool) {
           let req = pendingRequirements[refundCard.candidateId];
           if (!req) {
             const reqRes = await fetch('/api/builder/requirement', {
@@ -1246,12 +1332,14 @@ export default function App() {
                   builderTraceRef.current = instData.builderTraceEntries;
                 }
                 if (instData.dayState) applyDayState(instData.dayState as DayState);
-                builtTool = candidateTool;
               }
             }
           }
         }
-
+      } else if (stop.actionKind === 'enable_refund_switch') {
+        const builtTool = (currentDayState.builtTools ?? []).find(
+          (t) => t.id === 'tool:refund_exceptions_desk:walnut_creek',
+        );
         if (builtTool && !currentDayState.refundSwitchEnabled) {
           const swRes = await fetch('/api/builder/switch-approve', {
             method: 'POST',
@@ -1455,7 +1543,11 @@ export default function App() {
             plainFont
             onClose={() => setInspectedFact(null)}
           />
-          <RealityNoteModal open={showRealityNote} onClose={() => setShowRealityNote(false)} />
+          <RealityNoteModal
+            open={showRealityNote}
+            simpleMode
+            onClose={() => setShowRealityNote(false)}
+          />
         </>
       );
     }
@@ -1504,7 +1596,12 @@ export default function App() {
     const effectiveHighlight = activeTourStop?.highlight ?? demoHighlight;
 
     return (
-      <div className="simple-shell min-h-screen overflow-x-hidden" data-day={currentDayState.date}>
+      <div
+        className={`simple-shell min-h-screen overflow-x-hidden ${
+          activeTourStop ? 'pb-52 sm:pb-40' : ''
+        }`}
+        data-day={currentDayState.date}
+      >
         <SimpleTopBar
           currentDate={currentDayState.date}
           dayIndex={dayIndex}
@@ -1530,19 +1627,18 @@ export default function App() {
           />
         )}
 
+        <div className="max-w-[1220px] mx-auto px-4 sm:px-6 pt-3">
+          <TeamPanel
+            dayState={currentDayState}
+            activeInvestigation={activeInvestigation}
+            builderProgressByCandidate={builderProgressByCandidate}
+          />
+        </div>
+
         <div className="max-w-[1220px] mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)] gap-6 items-start">
           {/* Left 60%: decisions, progress, results, turned down warnings, team */}
           <main className="space-y-4">
             <LiveWorkingBanner visible={liveSlow} />
-
-            {activeTourStop && (
-              <TourOverlay
-                stop={activeTourStop}
-                isBusy={requestInFlight}
-                onNext={handleNextTourStep}
-                onExit={() => setRunMode('drive')}
-              />
-            )}
 
             {runMode === 'watch' && demoCaption && (
               <div
@@ -1562,13 +1658,25 @@ export default function App() {
               </div>
             )}
 
-            {currentDayState.date === '2026-11-14' && currentDayState.endStatement && (
+            {currentDayState.date === '2026-11-14' && currentDayState.endStatement ? (
               <SimpleResultPage
                 dayState={currentDayState}
                 onInspectFact={setInspectedFact}
                 onRunAgainAndSayNo={() => void handleStartDrive()}
                 onShowTechnicalDetail={() => setShowTechnicalDetail(true)}
               />
+            ) : (
+              currentDayState.moneyAccount?.dayByDayPoints && (
+                <DayByDayChartCard
+                  points={currentDayState.moneyAccount.dayByDayPoints}
+                  events={currentDayState.moneyAccount.dayByDayEvents ?? []}
+                  totalDays={totalDays}
+                  activeTab={chartTab}
+                  currentDate={currentDayState.date}
+                  onChangeTab={setChartTab}
+                  onInspectFact={setInspectedFact}
+                />
+              )
             )}
 
             <SimpleOwnerFeed
@@ -1581,6 +1689,7 @@ export default function App() {
               builderErrorByCandidate={builderErrorByCandidate}
               demoHighlight={effectiveHighlight}
               isTourMode={runMode === 'tour'}
+              forceQuietOpen={activeTourStop?.scrollTarget === 'quiet'}
               onInspectFact={setInspectedFact}
               onApproveCard={(id) => {
                 setIsPlaying(false);
@@ -1654,7 +1763,19 @@ export default function App() {
           plainFont
           onClose={() => setInspectedFact(null)}
         />
-        <RealityNoteModal open={showRealityNote} onClose={() => setShowRealityNote(false)} />
+        <RealityNoteModal
+          open={showRealityNote}
+          simpleMode
+          onClose={() => setShowRealityNote(false)}
+        />
+        {activeTourStop && (
+          <TourOverlay
+            stop={activeTourStop}
+            isBusy={requestInFlight}
+            onNext={handleNextTourStep}
+            onExit={() => setRunMode('drive')}
+          />
+        )}
       </div>
     );
   }

@@ -39,7 +39,7 @@ export function InlineBuiltRefundToolCard({
 }: InlineBuiltRefundToolCardProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [iframeLoaded, setIframeLoaded] = useState(false);
-  const [expanded, setExpanded] = useState<boolean>(!switchEnabled || forceExpanded);
+  const [expanded, setExpanded] = useState<boolean>(true);
   const [pendingSwitchConfirm, setPendingSwitchConfirm] = useState(false);
 
   const cspHtml = injectSandboxCsp(tool.html);
@@ -110,6 +110,7 @@ export function InlineBuiltRefundToolCard({
   return (
     <div
       data-testid="inline-built-tool-card"
+      data-tour-target="inline_tool"
       className="simple-card-enter bg-white border border-[#CFE0D4] rounded-2xl p-4 sm:p-5 space-y-3 shadow-2xs"
     >
       <div className="flex flex-wrap items-start justify-between gap-2">

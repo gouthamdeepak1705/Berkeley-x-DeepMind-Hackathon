@@ -53,7 +53,7 @@ export function MoneyBar({ moneyAccount, onInspectFact }: MoneyBarProps) {
                 />
               </p>
               <p className="hidden sm:block mt-1 text-xs text-[#56695D]">
-                Proven:{' '}
+                From proven actions:{' '}
                 <FactValue
                   fact={moneyAccount.savedProvenFact}
                   onInspect={onInspectFact}
@@ -61,7 +61,7 @@ export function MoneyBar({ moneyAccount, onInspectFact }: MoneyBarProps) {
                   plainFont
                   className="text-[#25372C] font-medium"
                 />{' '}
-                · Likely:{' '}
+                · From likely actions:{' '}
                 <FactValue
                   fact={moneyAccount.savedLikelyFact}
                   onInspect={onInspectFact}

@@ -114,7 +114,7 @@ export function selectNextWatchDemoBeat(params: {
           return {
             id: key,
             caption:
-              'Gemini wrote the requirement for the Walnut Creek refund desk; building it and running three checks inside a sandbox.',
+              'The Developer wrote the plan for the Walnut Creek refund desk; building it and running three checks inside a sandbox.',
             highlight: { actionKey: `build_it:${item.candidateId}`, label: 'Build it' },
             action: { type: 'confirm_build', candidateId: item.candidateId },
           };
@@ -125,7 +125,7 @@ export function selectNextWatchDemoBeat(params: {
           return {
             id: key,
             caption:
-              'Late evening cash refunds at Walnut Creek need a store desk rather than a stock move; asking Gemini to plan the tool.',
+              'Late evening cash refunds at Walnut Creek need a store desk rather than a stock move; asking the Developer to plan the tool.',
             highlight: { actionKey: `build:${item.candidateId}`, label: 'Build' },
             action: { type: 'start_build', candidateId: item.candidateId },
           };

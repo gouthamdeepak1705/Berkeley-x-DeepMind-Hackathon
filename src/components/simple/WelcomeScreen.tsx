@@ -84,7 +84,7 @@ export function WelcomeScreen({
           </div>
 
           <p className="text-xs text-[#56695D] pt-1">
-            Built around Linden &amp; Rye, a simulated 10-store womenswear chain across 106 days (1 August to 14 November 2026).
+            The business is simulated. The AI decisions are real. The tour takes about 3 minutes.
           </p>
 
           <div className="pt-2 flex flex-wrap items-center gap-3">
@@ -157,7 +157,51 @@ export function AboutBusinessModal({
   if (!open) return null;
 
   const f = brief.summaryFacts;
-  const paragraphs = brief.narrativeSegments;
+  const lullAbsFact: Fact = {
+    ...f.lullIndex,
+    value: Math.abs(f.lullIndex.value),
+    formatted: `${Math.abs(f.lullIndex.value).toFixed(1)}%`,
+  };
+  const plainRules = brief.confirmedRules.map((rule) => {
+    if (rule.id === 'rule_lfl') {
+      return {
+        id: rule.id,
+        title: 'Stores open more than 18 months',
+        detail: 'The eight stores open more than 18 months form the main trading benchmark.',
+      };
+    }
+    if (rule.id === 'rule_calendar') {
+      return {
+        id: rule.id,
+        title: 'Seasonal trading calendar',
+        detail: 'Includes the late-summer dip, Labor Day weekend, and Thanksgiving week.',
+      };
+    }
+    if (rule.id === 'rule_donor_cover') {
+      return {
+        id: rule.id,
+        title: 'Stores with spare stock keep enough first',
+        detail:
+          'A store sending stock always keeps at least 8 weeks of stock left, and enough to reach its next delivery plus one week.',
+      };
+    }
+    if (rule.id === 'rule_transfer_limit') {
+      return {
+        id: rule.id,
+        title: 'Limit on large stock moves',
+        detail: 'Transfers above 500 units always wait for your approval.',
+      };
+    }
+    if (rule.id === 'rule_autonomy_start') {
+      return {
+        id: rule.id,
+        title: 'You decide first',
+        detail:
+          'You approve every step at first. Automatic small moves are earned only after proven results.',
+      };
+    }
+    return rule;
+  });
 
   return (
     <div
@@ -188,43 +232,38 @@ export function AboutBusinessModal({
 
         <div className="p-5 overflow-y-auto space-y-4 text-sm text-[#25372C]">
           <div className="bg-white border border-[#E5DCC7] rounded-xl p-4 space-y-2.5 leading-relaxed">
-            {paragraphs && paragraphs.length > 0 ? (
-              paragraphs.map((segs, idx) => (
-                <p key={`ab-p-${idx}`}>
-                  <SimpleTextSegments segments={segs} onInspectFact={onInspectFact} />
-                </p>
-              ))
-            ) : (
-              <>
-                <p>
-                  {brief.businessName} runs{' '}
-                  <FactValue fact={f.storeCount} onInspect={onInspectFact} noPlus plainFont /> womenswear
-                  stores in California:{' '}
-                  <FactValue fact={f.establishedCount} onInspect={onInspectFact} noPlus plainFont />{' '}
-                  open more than 18 months and{' '}
-                  <FactValue fact={f.newStoreCount} onInspect={onInspectFact} noPlus plainFont />{' '}
-                  newer stores.
-                </p>
-                <p>
-                  Weekends are strongest: Saturdays run{' '}
-                  <FactValue fact={f.strongestWeekdayShare} onInspect={onInspectFact} noPlus plainFont />{' '}
-                  above the daily average. December lifts sales{' '}
-                  <FactValue fact={f.decemberIndex} onInspect={onInspectFact} noPlus plainFont /> while
-                  late summer softens{' '}
-                  <FactValue fact={f.lullIndex} onInspect={onInspectFact} noPlus plainFont />.
-                </p>
-                <p>
-                  Best-sellers make up{' '}
-                  <FactValue fact={f.bestSellersShare} onInspect={onInspectFact} noPlus plainFont /> of
-                  sales, and Knitwear{' '}
-                  <FactValue fact={f.knitwearShare} onInspect={onInspectFact} noPlus plainFont />.
-                </p>
-              </>
-            )}
+            <p>
+              {brief.businessName} runs{' '}
+              <FactValue fact={f.storeCount} onInspect={onInspectFact} noPlus plainFont /> womenswear
+              stores in California:{' '}
+              <FactValue fact={f.establishedCount} onInspect={onInspectFact} noPlus plainFont />{' '}
+              open more than 18 months and{' '}
+              <FactValue fact={f.newStoreCount} onInspect={onInspectFact} noPlus plainFont /> newer
+              stores (Burlingame in June and Napa opening late August).
+            </p>
+            <p>
+              Weekends are strongest: Saturdays run{' '}
+              <FactValue
+                fact={f.strongestWeekdayShare}
+                onInspect={onInspectFact}
+                noPlus
+                plainFont
+              />{' '}
+              above the daily average. December rises{' '}
+              <FactValue fact={f.decemberIndex} onInspect={onInspectFact} noPlus plainFont />, while
+              late summer drops by{' '}
+              <FactValue fact={lullAbsFact} onInspect={onInspectFact} noPlus plainFont />.
+            </p>
+            <p>
+              Best-sellers make up{' '}
+              <FactValue fact={f.bestSellersShare} onInspect={onInspectFact} noPlus plainFont /> of
+              sales, and Knitwear{' '}
+              <FactValue fact={f.knitwearShare} onInspect={onInspectFact} noPlus plainFont />.
+            </p>
           </div>
 
           <div className="bg-white border border-[#E5DCC7] rounded-xl divide-y divide-[#EFE8D6]">
-            {brief.confirmedRules.map((rule, idx) => (
+            {plainRules.map((rule, idx) => (
               <div key={rule.id} className="p-3.5 flex items-baseline gap-3">
                 <span className="text-xs font-semibold text-[#56695D] shrink-0">
                   {idx + 1}.

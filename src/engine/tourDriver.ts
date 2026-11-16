@@ -2,6 +2,26 @@ import { LIVE_START_DATE, diffDays } from './calendar';
 import { BuilderRequirement, DayState } from '../types/domain';
 import { DemoHighlightState } from '../components/OwnerFeed';
 
+export type TourActionKind =
+  | 'advance_only'
+  | 'approve_best_sellers'
+  | 'approve_wc_knitwear_and_advance'
+  | 'approve_rollout'
+  | 'build_refund_tool'
+  | 'enable_refund_switch'
+  | 'accept_autonomy'
+  | 'finish';
+
+export type TourScrollTarget =
+  | 'quiet'
+  | 'best_sellers_card'
+  | 'in_progress_transfer'
+  | 'rollout_card'
+  | 'refund_card'
+  | 'inline_tool'
+  | 'autonomy_offer'
+  | 'result_page';
+
 export interface TourStopSpec {
   stepNumber: number; // 1..8
   totalSteps: number; // 8
@@ -9,15 +29,9 @@ export interface TourStopSpec {
   targetDayIndex: number;
   title: string;
   explanation: string;
+  scrollTarget: TourScrollTarget;
   highlight: DemoHighlightState | null;
-  actionKind:
-    | 'approve_best_sellers'
-    | 'approve_wc_knitwear'
-    | 'approve_rollout'
-    | 'build_and_switch_refunds'
-    | 'accept_autonomy'
-    | 'advance_only'
-    | 'finish';
+  actionKind: TourActionKind;
 }
 
 export const TOUR_TOTAL_STEPS = 8;
@@ -26,73 +40,81 @@ const STEP_SPECS: Array<Omit<TourStopSpec, 'targetDayIndex' | 'highlight'>> = [
   {
     stepNumber: 1,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-09-08',
-    title: 'Flagship stores running low on best-sellers',
+    targetDate: '2026-08-17',
+    title: 'It noticed, and stayed quiet',
     explanation:
-      'Sales are normal, not falling. Two flagship stores are below 2.5 weeks of stock and Santana Row is next. Opscien suggests moving stock from stores with plenty, while holding Santana Row back for comparison.',
-    actionKind: 'approve_best_sellers',
+      'Normal summer dips happen every August. Opscien checked the calendar, ruled out a real problem, and did not wake you.',
+    scrollTarget: 'quiet',
+    actionKind: 'advance_only',
   },
   {
     stepNumber: 2,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-09-25',
-    title: 'A smaller knitwear shortage',
+    targetDate: '2026-09-08',
+    title: 'It speaks',
     explanation:
-      'Walnut Creek is running short on knitwear. Moving 479 units leaves plenty at other stores and avoids empty shelves. Because this is under 500 units at one store, Opscien measures before and after.',
-    actionKind: 'approve_wc_knitwear',
+      'Two big stores will run out of Best-sellers before delivery. Opscien suggests moving spare stock while holding Santana Row back to prove it.',
+    scrollTarget: 'best_sellers_card',
+    actionKind: 'approve_best_sellers',
   },
   {
     stepNumber: 3,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-09-27',
-    title: 'Proven against the store held back',
+    targetDate: '2026-09-08',
+    title: 'It acts safely',
     explanation:
-      'Union Square and Palo Alto received stock and kept selling. Santana Row stayed held back and lost sales. Because stock was the only difference, Opscien asks to send the rest now.',
-    actionKind: 'approve_rollout',
+      'Every spare-stock store keeps enough stock to reach its own delivery. No new stock was bought, and Santana Row stays held back to compare.',
+    scrollTarget: 'in_progress_transfer',
+    actionKind: 'approve_wc_knitwear_and_advance',
   },
   {
     stepNumber: 4,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-09-30',
-    title: 'Cash refunds with no matching sale',
+    targetDate: '2026-09-27',
+    title: 'It proves the result',
     explanation:
-      'Walnut Creek has high evening cash refunds with no matching receipt on Till 2. Moving stock cannot fix a till rule. Opscien builds a tested review desk and sets a $50 manager approval switch.',
-    actionKind: 'build_and_switch_refunds',
+      'Stores that got stock kept selling, while Santana Row dropped behind. With the gain proven, Opscien asks to send the rest now.',
+    scrollTarget: 'rollout_card',
+    actionKind: 'approve_rollout',
   },
   {
     stepNumber: 5,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-10-05',
-    title: 'Earning the right to act alone',
+    targetDate: '2026-09-30',
+    title: 'It finds a loss nobody was looking for',
     explanation:
-      'Three small stock moves worked out of three, with one proven against comparison. Opscien asks if it can handle stock transfers under 500 units on its own and report after.',
-    actionKind: 'accept_autonomy',
+      'Walnut Creek has high late-evening cash refunds with no matching sale on Till 2. Opscien proposes a refund check screen and a $50 approval rule.',
+    scrollTarget: 'refund_card',
+    actionKind: 'build_refund_tool',
   },
   {
     stepNumber: 6,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-10-15',
-    title: 'Acting within limits at Pasadena',
+    targetDate: '2026-09-30',
+    title: 'It builds what was missing',
     explanation:
-      'Pasadena ran low on knitwear under 500 units. Because you allowed small moves earlier, Opscien moved 424 units automatically, stayed within every limit, and gave you an Undo button.',
-    actionKind: 'advance_only',
+      'The new refund desk was built and tested three times. Next sets the $50 manager approval switch so the loss at the till stops tomorrow.',
+    scrollTarget: 'inline_tool',
+    actionKind: 'enable_refund_switch',
   },
   {
     stepNumber: 7,
     totalSteps: TOUR_TOTAL_STEPS,
-    targetDate: '2026-11-01',
-    title: 'Acting within limits at Napa',
+    targetDate: '2026-10-05',
+    title: 'It earns trust',
     explanation:
-      'Napa opened late August and just ran short on knitwear under 500 units. Opscien handled the transfer automatically and logged the gain and Undo button under Done for you.',
-    actionKind: 'advance_only',
+      'Three small transfers all worked, with one proven against comparison. Opscien asks to handle stock transfers under 500 units itself and report after.',
+    scrollTarget: 'autonomy_offer',
+    actionKind: 'accept_autonomy',
   },
   {
     stepNumber: 8,
     totalSteps: TOUR_TOTAL_STEPS,
     targetDate: '2026-11-14',
-    title: 'The full 106-day money result',
+    title: 'The result',
     explanation:
-      'This summary compares what would have been lost without Opscien against what was actually lost. Every figure opens its exact formula when tapped.',
+      'Opscien handled Pasadena and Napa automatically within your limits. Every dollar above compares running with Opscien against taking no action.',
+    scrollTarget: 'result_page',
     actionKind: 'finish',
   },
 ];
@@ -100,7 +122,7 @@ const STEP_SPECS: Array<Omit<TourStopSpec, 'targetDayIndex' | 'highlight'>> = [
 export function getTourStop(
   stepNumber: number,
   dayState?: DayState | null,
-  pendingRequirements?: Record<string, BuilderRequirement>,
+  _pendingRequirements?: Record<string, BuilderRequirement>,
 ): TourStopSpec {
   const clamped = Math.max(1, Math.min(TOUR_TOTAL_STEPS, stepNumber));
   const base = STEP_SPECS[clamped - 1];
@@ -108,42 +130,33 @@ export function getTourStop(
 
   let highlight: DemoHighlightState | null = null;
   if (dayState) {
-    if (clamped === 1) {
+    if (clamped === 2) {
       const card = dayState.raised.find(
         (r) => r.candidateId === 'situation:stock_running_out:best_sellers' && !r.isRollout,
       );
       if (card) {
         highlight = { actionKey: `approve:${card.candidateId}`, label: 'Approve' };
       }
-    } else if (clamped === 2) {
-      const card = dayState.raised.find(
-        (r) => r.candidateId === 'situation:stock_running_out:knitwear',
-      );
-      if (card) {
-        highlight = { actionKey: `approve:${card.candidateId}`, label: 'Approve' };
-      }
-    } else if (clamped === 3) {
+    } else if (clamped === 4) {
       const rollout = dayState.raised.find((r) => r.isRollout);
       if (rollout) {
         highlight = { actionKey: `approve:${rollout.candidateId}`, label: 'Approve' };
       }
-    } else if (clamped === 4) {
-      const refundTool = (dayState.builtTools ?? []).find(
-        (t) => t.id === 'tool:refund_exceptions_desk:walnut_creek',
-      );
+    } else if (clamped === 5) {
       const refundCard = dayState.raised.find(
         (r) => r.investigation?.outcomeKind === 'tool_to_build',
       );
+      if (refundCard) {
+        highlight = { actionKey: `build:${refundCard.candidateId}`, label: 'Build' };
+      }
+    } else if (clamped === 6) {
+      const refundTool = (dayState.builtTools ?? []).find(
+        (t) => t.id === 'tool:refund_exceptions_desk:walnut_creek',
+      );
       if (refundTool && !dayState.refundSwitchEnabled) {
         highlight = { actionKey: `open_tool:${refundTool.id}`, label: 'Turn on $50 approval rule' };
-      } else if (refundCard) {
-        if (pendingRequirements?.[refundCard.candidateId]) {
-          highlight = { actionKey: `build_it:${refundCard.candidateId}`, label: 'Build it' };
-        } else {
-          highlight = { actionKey: `build:${refundCard.candidateId}`, label: 'Build' };
-        }
       }
-    } else if (clamped === 5) {
+    } else if (clamped === 7) {
       if (dayState.autonomyRecord?.offerCard?.status === 'pending') {
         highlight = { actionKey: 'autonomy_yes', label: 'Yes, within those limits' };
       }

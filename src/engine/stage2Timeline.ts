@@ -38,6 +38,7 @@ import {
   RaisedStoreSnapshot,
   StoreId,
   SupportingEvidence,
+  TextSegment,
   TraceEntry,
   WatcherEvalRecord,
 } from '../types/domain';
@@ -53,7 +54,7 @@ import {
 import { createFact } from './facts';
 import { DEFAULT_SEED } from './prng';
 import { runSimulation, SimulationRun } from './simulation';
-import { ESTABLISHED_STORES, STORE_MAP } from './stores';
+import { ESTABLISHED_STORES, STORE_MAP, STORES } from './stores';
 
 export interface Stage2StepResponse {
   dayState: DayState;
@@ -441,14 +442,20 @@ function buildRaisedItemSnapshot(
       sit.detectorKind === 'stock_running_out' &&
       (sit.groupId === 'best_sellers' || sit.groupId === 'knitwear')
     ) {
+      const gid: 'best_sellers' | 'knitwear' = sit.groupId;
       const storeIds = Array.from(sit.stores.keys());
-      const lost = sumLostSalesForWindow(sim, storeIds, sit.groupId, sit.firstDetectedOn, date);
+      const delayStart = sit.deferredOn ?? sit.firstDetectedOn;
+      const lost = storeIds.reduce(
+        (sum, sid) =>
+          sum + Math.round(sumLostSalesForWindow(sim, [sid], gid, delayStart, date)),
+        0,
+      );
       costOfDelayFact = createFact(
         `sit:${sit.id}:delay_cost:${date}`,
         'Cost of delay so far',
         lost,
         'USD',
-        `Expected minus actual ${getGroupDisplayName(sit.groupId)} sales across ${storeNames.join(', ')} from ${sit.firstDetectedOn} (when first raised) through ${date}.`,
+        `Expected minus actual ${getGroupDisplayName(sit.groupId)} sales across ${storeNames.join(', ')} from ${delayStart} through ${date}.`,
       );
     } else {
       const daysElapsed = Math.max(1, diffDays(sit.firstDetectedOn, date));
@@ -649,6 +656,147 @@ function formatReadableCandidateName(candidateId: string): string {
   return candidateId.replace(/[_:]+/g, ' ');
 }
 
+function formatNaturalStoreList(names: string[]): string {
+  if (names.length === 0) return '';
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+}
+
+function reconcileInvestigationDisplayFacts(
+  item: RaisedItem,
+  controlStores: Set<string>,
+): RaisedItem {
+  const inv = item.investigation;
+  if (!inv || item.isRollout) return item;
+
+  let changed = false;
+  const spareFact = item.visualMetrics?.spareTotalUnitsFact;
+  const plan = item.transferPlan ?? inv.transferPlan;
+
+  // A.3: Synchronize tool:stock:donor_surplus:* fact values with spareTotalUnitsFact (3,822 units vs 5,178)
+  const factsById: Record<string, Fact> = { ...inv.factsById };
+  let oldSpareFormatted: string | null = null;
+  if (spareFact) {
+    for (const [k, f] of Object.entries(factsById)) {
+      if (k.startsWith('tool:stock:donor_surplus:') && f.value !== spareFact.value) {
+        oldSpareFormatted = f.formatted;
+        factsById[k] = {
+          ...f,
+          value: spareFact.value,
+          formatted: spareFact.formatted,
+          note: spareFact.note,
+        };
+        changed = true;
+      }
+    }
+  }
+
+  // A.4: Synchronize excluded holdout donor mentions (e.g. Santana Row -> Rockridge on Sep 25)
+  const donorNames = plan ? Array.from(new Set(plan.transferLines.map((l) => l.fromStoreName))) : [];
+  const donorListText = formatNaturalStoreList(donorNames);
+  const receiverNames = new Set(plan ? plan.transferLines.map((l) => l.toStoreName) : []);
+  const holdoutNames = new Set<string>();
+  for (const cid of controlStores) {
+    const nm = STORE_MAP[cid as StoreId]?.name;
+    if (nm) holdoutNames.add(nm);
+  }
+  if (plan?.holdoutStoreName) {
+    holdoutNames.add(plan.holdoutStoreName);
+  }
+  const excludedHoldoutDonors =
+    donorNames.length > 0
+      ? STORES.map((s) => s.name).filter(
+          (nm) => holdoutNames.has(nm) && !donorNames.includes(nm) && !receiverNames.has(nm),
+        )
+      : [];
+
+  const rewriteText = (txt: string, allowDonorRename: boolean): string => {
+    let out = txt;
+    if (spareFact && oldSpareFormatted && out.includes(oldSpareFormatted)) {
+      out = out.split(oldSpareFormatted).join(spareFact.formatted);
+    }
+    if (allowDonorRename && donorListText && excludedHoldoutDonors.length > 0) {
+      for (const wrongDonor of excludedHoldoutDonors) {
+        const escaped = wrongDonor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const reFromTo = new RegExp(`\\bfrom\\s+${escaped}(?=\\s+to\\b)`, 'g');
+        const reFromEnd = new RegExp(`\\bfrom\\s+${escaped}\\b`, 'g');
+        out = out.replace(reFromTo, `from ${donorListText}`);
+        out = out.replace(reFromEnd, `from ${donorListText}`);
+      }
+    }
+    return out;
+  };
+
+  const mapSegments = (segs: TextSegment[], allowDonorRename: boolean): TextSegment[] => {
+    let segChanged = false;
+    const mapped = segs.map((seg) => {
+      if (seg.type === 'fact') {
+        const updatedFact = factsById[seg.fact.id];
+        if (updatedFact && (updatedFact.value !== seg.fact.value || updatedFact.formatted !== seg.fact.formatted)) {
+          segChanged = true;
+          return { ...seg, fact: updatedFact };
+        }
+        return seg;
+      }
+      const nextText = rewriteText(seg.text, allowDonorRename);
+      if (nextText !== seg.text) {
+        segChanged = true;
+        return { ...seg, text: nextText };
+      }
+      return seg;
+    });
+    if (segChanged) changed = true;
+    return segChanged ? mapped : segs;
+  };
+
+  const findingSegments = mapSegments(inv.findingSegments, true);
+  const causeSegments = mapSegments(inv.causeSegments, true);
+  const proposalSegments = mapSegments(inv.proposalSegments, true);
+  const nextOutcome = rewriteText(inv.outcomeDetail, true);
+  if (nextOutcome !== inv.outcomeDetail) changed = true;
+
+  const nextCauses = inv.causes.map((c) => {
+    const nextSummary = rewriteText(c.summary, false);
+    if (nextSummary !== c.summary) changed = true;
+    return {
+      ...c,
+      summary: nextSummary,
+    };
+  });
+
+  const nextOptions = inv.options.map((opt) => {
+    if (opt.isDoNothing) return opt;
+    const nextLabel = rewriteText(opt.label, true);
+    const nextDescription = rewriteText(opt.description, true);
+    if (nextLabel !== opt.label || nextDescription !== opt.description) changed = true;
+    return {
+      ...opt,
+      label: nextLabel,
+      description: nextDescription,
+    };
+  });
+
+  const nextTransferPlan = item.transferPlan ?? inv.transferPlan;
+  if (nextTransferPlan !== inv.transferPlan) changed = true;
+
+  if (!changed) return item;
+  return {
+    ...item,
+    investigation: {
+      ...inv,
+      factsById,
+      findingSegments,
+      causeSegments,
+      proposalSegments,
+      outcomeDetail: nextOutcome,
+      causes: nextCauses,
+      options: nextOptions,
+      transferPlan: nextTransferPlan,
+    },
+  };
+}
+
 /**
  * Evaluates the live timeline deterministically up to `targetDayIndex`,
  * incrementally reusing cached daily loop snapshots in server memory when inputs match,
@@ -747,7 +895,7 @@ export async function evaluateStage2UpToDay(params: {
   const contextKey = hashStateKey({
     seed,
     decisions: contextDecisions.map((d) => ({ id: d.id, date: d.date, kind: d.kind, undoneOnDate: d.undoneOnDate ?? null, isAutonomous: Boolean(d.isAutonomous) })),
-    reactions: reactions.map((r) => ({ id: r.id, candidateId: r.candidateId, date: r.date, reaction: r.reaction })),
+    reactions: reactions.map((r) => ({ id: r.id, candidateId: r.candidateId, date: r.date, reaction: r.reaction, storeIds: r.storeIds ?? null })),
     autonomyReactions: autonomyReactions.map((ar) => ({ id: ar.id, offerId: ar.offerId, date: ar.date, reaction: ar.reaction })),
     controlStores: Array.from(baseControlStores).sort(),
     builtTools: builtTools.map((t) => ({ id: t.id, installedOn: t.installedOn, mode: t.mode })),
@@ -1769,6 +1917,26 @@ export async function evaluateStage2UpToDay(params: {
       }
     }
 
+    // Count each visible card/rollout once before applying today's owner reactions
+    for (const sit of openSituations.values()) {
+      if (
+        !deferredSituations.has(sit.id) &&
+        !approvedSituations.has(sit.id) &&
+        !dismissedSituations.has(sit.id)
+      ) {
+        askedOwnerKeys.add(`ep:${sit.id}:${sit.firstDetectedOn}`);
+      }
+    }
+    for (const rc of dayFollowUp.rolloutCards) {
+      if (
+        !deferredSituations.has(rc.candidateId) &&
+        !approvedSituations.has(rc.candidateId) &&
+        !dismissedSituations.has(rc.candidateId)
+      ) {
+        askedOwnerKeys.add(`ep:${rc.candidateId}`);
+      }
+    }
+
     // Apply owner reactions from `date` AFTER morning detectors/watcher run so morning detection & eval log are preserved
     for (const r of reactions) {
       if (r.date !== date) continue;
@@ -1856,15 +2024,6 @@ export async function evaluateStage2UpToDay(params: {
           outcome: 'info',
         });
       }
-    }
-
-    for (const sitKey of openSituations.keys()) {
-      if (!deferredSituations.has(sitKey) && !approvedSituations.has(sitKey) && !dismissedSituations.has(sitKey)) {
-        askedOwnerKeys.add(sitKey);
-      }
-    }
-    for (const rc of dayFollowUp.rolloutCards) {
-      askedOwnerKeys.add(rc.candidateId);
     }
 
     const isPendingOnThisDay = Boolean(pendingSituation && i === clampedTarget);
@@ -2026,41 +2185,51 @@ export async function evaluateStage2UpToDay(params: {
 
   for (const r of reactions) {
     if (r.date <= targetDate) {
-      askedOwnerKeys.add(`${r.candidateId}:${r.date}`);
+      const hasEpisode = Array.from(askedOwnerKeys).some((k) =>
+        k.startsWith(`ep:${r.candidateId}`),
+      );
+      if (!hasEpisode) {
+        askedOwnerKeys.add(`ep:${r.candidateId}`);
+      }
     }
   }
   for (const ar of autonomyReactions) {
     if (ar.date <= targetDate) {
-      askedOwnerKeys.add(`autonomy:${ar.offerId}`);
+      askedOwnerKeys.add(`ep:autonomy:${ar.offerId}`);
     }
   }
   for (const r of raisedSnapshot) {
-    const hasSameDayReaction = reactions.some(
-      (rx) => rx.candidateId === r.candidateId && rx.date === r.firstDetectedOn,
-    );
-    if (!hasSameDayReaction) {
-      askedOwnerKeys.add(`${r.candidateId}:${r.firstDetectedOn}`);
-    }
+    const epKey = r.isRollout
+      ? `ep:${r.candidateId}`
+      : `ep:${r.candidateId}:${r.firstDetectedOn}`;
+    askedOwnerKeys.add(epKey);
   }
   if (autonomyRecord.offerCard) {
-    askedOwnerKeys.add(`autonomy:${autonomyRecord.offerCard.id}`);
+    askedOwnerKeys.add(`ep:autonomy:${autonomyRecord.offerCard.id}`);
   }
 
   const dismissedStockObj: Record<string, string[]> = {};
   for (const [k, s] of dismissedStockStores.entries()) {
     dismissedStockObj[k] = Array.from(s);
   }
+  const openSitStoresObj: Record<string, StoreId[]> = {};
+  for (const [k, sit] of openSituations.entries()) {
+    openSitStoresObj[k] = Array.from(sit.stores.keys());
+  }
 
-  const enrichedRaisedSnapshot = raisedSnapshot.map((item) => ({
-    ...item,
-    visualMetrics: computeCardVisualMetrics({
-      sim,
-      date: targetDate,
-      item,
-      decisions,
-      doneForYou: finalFollowUp.doneForYou,
-    }),
-  }));
+  const enrichedRaisedSnapshot = raisedSnapshot.map((item) => {
+    const withMetrics: RaisedItem = {
+      ...item,
+      visualMetrics: computeCardVisualMetrics({
+        sim,
+        date: targetDate,
+        item,
+        decisions,
+        doneForYou: finalFollowUp.doneForYou,
+      }),
+    };
+    return reconcileInvestigationDisplayFacts(withMetrics, finalFollowUp.activeControlStores);
+  });
 
   const moneyAccount = buildMoneyAccountData({
     seed,
@@ -2075,6 +2244,7 @@ export async function evaluateStage2UpToDay(params: {
     builtTools: visibleBuiltTools,
     watcherEvalLog,
     dismissedStockStores: dismissedStockObj,
+    openSituationStoresByCandidate: openSitStoresObj,
     signalsCheckedCount,
     askedOwnerCount: askedOwnerKeys.size,
   });

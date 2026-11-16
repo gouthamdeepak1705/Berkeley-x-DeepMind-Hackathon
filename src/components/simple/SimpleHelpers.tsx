@@ -27,10 +27,12 @@ export function toSimpleEnglish(
       /\bUnlinked late-evening cash refunds\b/gi,
       'Late-evening cash refunds with no matching sale',
     )
-    .replace(/\bdonor stores\b/g, 'stores with stock to spare')
-    .replace(/\bDonor stores\b/g, 'Stores with stock to spare')
-    .replace(/\bdonor store\b/g, 'store with stock to spare')
-    .replace(/\bDonor store\b/g, 'Store with stock to spare')
+    .replace(/\bestablished stores\b/g, 'stores open more than 18 months')
+    .replace(/\bEstablished stores\b/g, 'Stores open more than 18 months')
+    .replace(/\bdonor stores\b/g, 'stores with spare stock')
+    .replace(/\bDonor stores\b/g, 'Stores with spare stock')
+    .replace(/\bdonor store\b/g, 'store with spare stock')
+    .replace(/\bDonor store\b/g, 'Store with spare stock')
     .replace(/\bdonors\b/g, 'stores with spare stock')
     .replace(/\bdonor\b/gi, 'spare-stock')
     .replace(/\bkeep their cover\b/gi, 'keep enough stock for themselves')
@@ -43,10 +45,22 @@ export function toSimpleEnglish(
     .replace(/\bComparable stores\b/g, 'Stores open more than 18 months')
     .replace(/\blike-for-like\b/gi, 'stores open more than 18 months')
     .replace(/\bLFL\b/g, 'stores open more than 18 months')
-    .replace(/\b(the|a)\s+(held-out control store|held-out store|control store|comparison store)\b/gi, 'the store held back for comparison')
-    .replace(/\b(held-out control store|held-out store|control store)\b/gi, 'the store held back for comparison')
+    .replace(/\b(the|a)\s+(held[- ]out control store|held[- ]out store|control store|comparison store)\b/gi, 'the store held back for comparison')
+    .replace(/\b(held[- ]out control store|held[- ]out store|control store)\b/gi, 'store held back for comparison')
+    .replace(/\bheld[- ]out\b/gi, 'held back')
     .replace(/\bcomparison store\b/gi, 'store held back for comparison')
-    .replace(/\blook-alikes\b/gi, 'things that looked like problems but were not')
+    .replace(/\bflagship stores\b/g, 'big stores')
+    .replace(/\bFlagship stores\b/g, 'Big stores')
+    .replace(/\bflagships?\b/gi, 'big stores')
+    .replace(/\bexcess\b/gi, 'extra')
+    .replace(/\boperators\b/g, 'staff members')
+    .replace(/\bOperators\b/g, 'Staff members')
+    .replace(/\boperator\b/gi, 'staff member')
+    .replace(/\bsurplus\b/gi, 'spare stock')
+    .replace(/\breplenishments\b/g, 'deliveries')
+    .replace(/\breplenishment\b/gi, 'delivery')
+    .replace(/\bdepleted\b/gi, 'used up')
+    .replace(/\blook-alikes\b/g, 'things that looked like problems but were not')
     .replace(/\blook-alike\b/gi, 'thing that looked like a problem but was not')
     .replace(/\bchain median\b/gi, 'the other stores')
     .replace(/\bmedian\b/gi, 'typical')
@@ -55,8 +69,8 @@ export function toSimpleEnglish(
     .replace(/\bunlinked\b/gi, 'with no matching sale')
     .replace(/\bleakage\b/gi, 'money lost')
     .replace(/\bexposure\b/gi, 'loss')
-    .replace(/\bGateway approved\b/gi, 'Passed the safety limits')
-    .replace(/\bGateway passed\b/gi, 'Passed the safety limits')
+    .replace(/\bGateway approved\b/g, 'Passed the safety limits')
+    .replace(/\bGateway passed\b/g, 'Passed the safety limits')
     .replace(/\bgateway\b/gi, 'safety limits')
     .replace(/\bRollout:\s*/gi, 'Send the rest: ')
     .replace(/\brolling out\b/gi, 'sending the rest')
@@ -73,7 +87,6 @@ export function toSimpleEnglish(
     .replace(/\bnot proven alone\b/gi, 'likely, not proven')
     .replace(/\bcausal proof is partial\b/gi, 'likely, not proven')
     .replace(/\bNoticed and let go\b/gi, 'Noticed, checked, and stayed quiet')
-    .replace(/\bGemini\b/gi, 'Opscien')
     .replace(/\breplayed\b/gi, 'recorded')
     .replace(/\bfallback\b/gi, 'backup')
     .replace(/\bcaps?\b/gi, 'limits')
@@ -102,6 +115,32 @@ export function SimpleTextSegments({
         ) : (
           <FactValue
             key={`sf-${seg.fact.id}-${idx}`}
+            fact={seg.fact}
+            onInspect={onInspectFact}
+            noPlus
+            plainFont
+          />
+        ),
+      )}
+    </>
+  );
+}
+
+export function RawTextSegments({
+  segments,
+  onInspectFact,
+}: {
+  segments: TextSegment[];
+  onInspectFact: (fact: Fact) => void;
+}) {
+  return (
+    <>
+      {segments.map((seg, idx) =>
+        seg.type === 'text' ? (
+          <span key={`rt-${idx}`}>{stripUnresolvedBraces(seg.text)}</span>
+        ) : (
+          <FactValue
+            key={`rf-${seg.fact.id}-${idx}`}
             fact={seg.fact}
             onInspect={onInspectFact}
             noPlus

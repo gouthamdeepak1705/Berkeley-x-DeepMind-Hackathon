@@ -182,6 +182,11 @@ let nextCallRecordSeq = 1;
 let currentCapDay = getUtcDayKey();
 let uncachedDecisionCount = 0;
 let uncachedOtherCount = 0;
+let liveCallsInFlight = 0;
+
+export function getLiveCallsInFlight(): number {
+  return liveCallsInFlight;
+}
 
 export function getGeminiPlaybackMode(): GeminiPlaybackMode {
   return geminiPlaybackMode;
@@ -518,6 +523,7 @@ export async function callDecisionsRaw(params: {
   }
 
   const start = Date.now();
+  liveCallsInFlight += 1;
   try {
     let rawResp: DecisionResponsePayload;
     const clientAny = client as unknown as {
@@ -640,6 +646,8 @@ export async function callDecisionsRaw(params: {
       error: errText,
     });
     throw err;
+  } finally {
+    liveCallsInFlight = Math.max(0, liveCallsInFlight - 1);
   }
 }
 
@@ -708,6 +716,7 @@ export async function callInteractionRaw(params: {
   }
 
   const start = Date.now();
+  liveCallsInFlight += 1;
   try {
     const requestBody: Record<string, unknown> = {
       model: params.model,
@@ -848,6 +857,8 @@ export async function callInteractionRaw(params: {
       error: errText,
     });
     throw err;
+  } finally {
+    liveCallsInFlight = Math.max(0, liveCallsInFlight - 1);
   }
 }
 

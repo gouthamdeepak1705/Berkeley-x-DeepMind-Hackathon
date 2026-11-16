@@ -10,7 +10,7 @@ import {
 } from '../../types/domain';
 import { FactValue } from '../FactValue';
 import { BuilderErrorState, DemoHighlightState } from '../OwnerFeed';
-import { SimpleTextSegments, toSimpleEnglish } from './SimpleHelpers';
+import { RawTextSegments, SimpleTextSegments, toSimpleEnglish } from './SimpleHelpers';
 import {
   ProofComparisonVisual,
   RefundComparisonVisual,
@@ -146,10 +146,31 @@ export function SimpleProblemCard({
 
   const cardTitle = buildAccurateTitle(item);
   const evidenceList = item.evidence ?? [];
+  const headerDateStr = item.reRaisedOn ? dayState.date : item.firstDetectedOn;
+  const tourTarget = item.isRollout
+    ? 'rollout_card'
+    : item.detectorKind === 'refunds_out_of_line'
+      ? 'refund_card'
+      : item.candidateId === 'situation:stock_running_out:best_sellers'
+        ? 'best_sellers_card'
+        : undefined;
+
+  const storeNamesList = (item.stores ?? []).map((s) => s.storeName);
+  const storeListText =
+    storeNamesList.length === 0
+      ? 'This store'
+      : storeNamesList.length === 1
+        ? storeNamesList[0]
+        : storeNamesList.length === 2
+          ? `${storeNamesList[0]} and ${storeNamesList[1]}`
+          : `${storeNamesList.slice(0, -1).join(', ')}, and ${storeNamesList[storeNamesList.length - 1]}`;
+  const groupLabel = item.groupId === 'knitwear' ? 'Knitwear' : 'Best-sellers';
+  const proofBar = vm?.proofBarData;
 
   return (
     <article
       data-card-id={item.candidateId}
+      data-tour-target={tourTarget}
       className="simple-card-enter bg-white border border-[#DFD5BE] rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-2xs"
     >
       {/* Header */}
@@ -163,7 +184,7 @@ export function SimpleProblemCard({
           </h3>
         </div>
         <span className="text-xs text-[#56695D] shrink-0">
-          {formatShortDate(item.firstDetectedOn)}
+          {formatShortDate(headerDateStr)}
         </span>
       </div>
 
@@ -171,7 +192,8 @@ export function SimpleProblemCard({
       {item.reRaisedOn && (
         <div className="p-3 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] text-xs space-y-1">
           <p className="font-medium text-[#78350F]">
-            Put aside on {item.deferredOn ? formatShortDate(item.deferredOn) : 'an earlier day'}. Raised again today.
+            Put aside on {item.deferredOn ? formatShortDate(item.deferredOn) : 'an earlier day'}{' '}
+            (first raised {formatShortDate(item.firstDetectedOn)}). Raised again today.
           </p>
           {item.costOfDelayFact && (
             <p className="text-[#25372C]">
@@ -188,55 +210,195 @@ export function SimpleProblemCard({
         </div>
       )}
 
-      {/* Four plain lines */}
+      {/* Four invariant plain lines built from Facts */}
       <dl className="space-y-2 text-sm">
         <div className="grid grid-cols-1 sm:grid-cols-[132px_1fr] gap-0.5 sm:gap-2">
           <dt className="text-xs font-semibold text-[#56695D]">What is happening</dt>
           <dd className="text-[#25372C] leading-snug">
             {item.isRollout ? (
-              <span>{toSimpleEnglish(item.summary)}</span>
-            ) : inv ? (
-              <SimpleTextSegments segments={inv.findingSegments} onInspectFact={onInspectFact} />
+              proofBar ? (
+                <>
+                  {proofBar.treatedNames} got stock and kept selling (
+                  <FactValue fact={proofBar.treatedPctFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                  of expected vs{' '}
+                  <FactValue fact={proofBar.holdoutPctFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                  at {proofBar.holdoutName}).
+                </>
+              ) : (
+                <span>{toSimpleEnglish(item.summary)}</span>
+              )
+            ) : item.detectorKind === 'refunds_out_of_line' ? (
+              vm?.walnutCreekRefundRateFact && vm?.peerRefundRateFact ? (
+                <>
+                  Walnut Creek cash refunds are{' '}
+                  <FactValue
+                    fact={vm.walnutCreekRefundRateFact}
+                    onInspect={onInspectFact}
+                    noPlus
+                    plainFont
+                  />
+                  , compared with{' '}
+                  <FactValue fact={vm.peerRefundRateFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                  at the other 7 stores open more than 18 months.
+                </>
+              ) : (
+                <span>{toSimpleEnglish(item.summary)}</span>
+              )
+            ) : vm?.daysOfStockLeftFact && vm?.currentCoverFact ? (
+              <>
+                Sales are normal. {storeListText} will run out of {groupLabel} in{' '}
+                <FactValue fact={vm.daysOfStockLeftFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                (<FactValue fact={vm.currentCoverFact} onInspect={onInspectFact} noPlus plainFont />)
+                {vm.daysUntilDeliveryFact ? (
+                  <>
+                    , before next delivery in{' '}
+                    <FactValue
+                      fact={vm.daysUntilDeliveryFact}
+                      onInspect={onInspectFact}
+                      noPlus
+                      plainFont
+                    />
+                    .
+                  </>
+                ) : (
+                  '. No delivery is planned.'
+                )}
+              </>
             ) : (
               <span>{toSimpleEnglish(item.summary)}</span>
             )}
           </dd>
         </div>
 
-        {inv && !item.isRollout && (
-          <div className="grid grid-cols-1 sm:grid-cols-[132px_1fr] gap-0.5 sm:gap-2">
-            <dt className="text-xs font-semibold text-[#56695D]">Why</dt>
-            <dd className="text-[#25372C] leading-snug">
-              <SimpleTextSegments segments={inv.causeSegments} onInspectFact={onInspectFact} />
-            </dd>
-          </div>
-        )}
+        <div className="grid grid-cols-1 sm:grid-cols-[132px_1fr] gap-0.5 sm:gap-2">
+          <dt className="text-xs font-semibold text-[#56695D]">Why</dt>
+          <dd className="text-[#25372C] leading-snug">
+            {item.isRollout ? (
+              proofBar ? (
+                <>
+                  Holding {proofBar.holdoutName} back proved the stock caused the gain
+                  {proofBar.provenGainFact ? (
+                    <>
+                      {' '}
+                      (
+                      <FactValue
+                        fact={proofBar.provenGainFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />{' '}
+                      so far).
+                    </>
+                  ) : (
+                    '.'
+                  )}
+                </>
+              ) : (
+                'The test against the store held back for comparison proved the transfer saved sales.'
+              )
+            ) : item.detectorKind === 'refunds_out_of_line' ? (
+              'Most of the extra refunds are late-evening cash refunds with no matching sale on Till 2 by one staff member.'
+            ) : (
+              <>
+                Nothing is wrong with demand. Stock is simply low there
+                {vm?.spareStoreCountFact &&
+                vm?.spareTotalUnitsFact &&
+                vm.spareStoreCountFact.value > 0 ? (
+                  <>
+                    , while{' '}
+                    <FactValue
+                      fact={vm.spareStoreCountFact}
+                      onInspect={onInspectFact}
+                      noPlus
+                      plainFont
+                    />{' '}
+                    other stores have{' '}
+                    <FactValue
+                      fact={vm.spareTotalUnitsFact}
+                      onInspect={onInspectFact}
+                      noPlus
+                      plainFont
+                    />{' '}
+                    to spare.
+                  </>
+                ) : (
+                  '.'
+                )}
+              </>
+            )}
+          </dd>
+        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-[132px_1fr] gap-0.5 sm:gap-2">
           <dt className="text-xs font-semibold text-[#56695D]">What I suggest</dt>
           <dd className="font-medium text-[#25372C] leading-snug">
-            {describeSuggestedLine(item)}
+            {sc?.status === 'disagreed' ? (
+              'Two checks disagreed. Check these store numbers again.'
+            ) : item.isRollout && plan ? (
+              <>
+                Send <FactValue fact={plan.totalUnitsFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                of remaining {groupLabel} stock to{' '}
+                {plan.transferLines[0]?.toStoreName ?? proofBar?.holdoutName ?? 'Santana Row'} (arrives{' '}
+                {formatShortDate(plan.arrivalDate)}).
+              </>
+            ) : item.detectorKind === 'refunds_out_of_line' ? (
+              'Build a refund check screen and require manager approval for cash refunds over $50.'
+            ) : plan ? (
+              <>
+                Move <FactValue fact={plan.totalUnitsFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                from stores with spare stock to{' '}
+                {plan.treatedStoreIds.length === 1
+                  ? plan.transferLines[0]?.toStoreName ?? storeListText
+                  : `${plan.treatedStoreIds.length} short stores`}
+                {plan.holdoutStoreName ? `; hold ${plan.holdoutStoreName} back to compare` : ''}.
+              </>
+            ) : (
+              describeSuggestedLine(item)
+            )}
           </dd>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-[132px_1fr] gap-0.5 sm:gap-2">
           <dt className="text-xs font-semibold text-[#56695D]">If you do nothing</dt>
           <dd className="text-[#991B1B] font-medium leading-snug">
-            Lose about{' '}
-            <FactValue fact={stakeFact} onInspect={onInspectFact} noPlus plainFont /> each week.
-            {vm?.doNothingLossFact && vm.doNothingLossFact.value > 0 && (
-              <span>
-                {' '}
-                Total before next delivery:{' '}
-                <FactValue fact={vm.doNothingLossFact} onInspect={onInspectFact} noPlus plainFont />.
-              </span>
+            {item.isRollout ? (
+              <>
+                Lose about <FactValue fact={stakeFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                each week at{' '}
+                {proofBar?.holdoutName ?? plan?.transferLines[0]?.toStoreName ?? 'Santana Row'}.
+              </>
+            ) : item.detectorKind === 'refunds_out_of_line' ? (
+              <>
+                Lose about <FactValue fact={stakeFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                each week.
+              </>
+            ) : (
+              <>
+                Lose about <FactValue fact={stakeFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                each week.
+                {vm?.daysUntilDeliveryFact &&
+                  vm?.doNothingLossFact &&
+                  vm.doNothingLossFact.value > 0 && (
+                    <span>
+                      {' '}
+                      Total before next delivery:{' '}
+                      <FactValue
+                        fact={vm.doNothingLossFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                      .
+                    </span>
+                  )}
+              </>
             )}
           </dd>
         </div>
       </dl>
 
       {/* Embedded visual diagrams */}
-      {vm?.daysOfStockLeftFact && (
+      {!item.isRollout && vm?.daysOfStockLeftFact && (
         <StockShortageVisual metrics={vm} onInspectFact={onInspectFact} />
       )}
       {vm?.proofBarData && (
@@ -443,6 +605,12 @@ export function SimpleProblemCard({
             </button>
           </div>
 
+          <p className="text-[11px] text-[#56695D]">
+            Not now: I will ask again. Each week of waiting costs about{' '}
+            <FactValue fact={stakeFact} onInspect={onInspectFact} noPlus plainFont />. Dismiss: I stop
+            raising this for these stores.
+          </p>
+
           {dismissOpen && (
             <div className="p-2.5 rounded-xl bg-[#FFFDF7] border border-[#E5DCC7] flex flex-wrap items-center gap-1.5">
               <span className="text-xs text-[#56695D] mr-1">Why dismiss this?</span>
@@ -468,6 +636,17 @@ export function SimpleProblemCard({
       {/* Collapsible plain-English details */}
       {detailsOpen && (
         <div className="pt-3 border-t border-[#EFE8D6] space-y-3 text-xs">
+          {inv && !item.isRollout && (
+            <div className="p-2.5 rounded-lg bg-[#FFFDF7] border border-[#EFE8D6] space-y-1 text-[#25372C]">
+              <p className="font-semibold text-[#56695D]">Full analysis</p>
+              <p className="leading-snug">
+                <RawTextSegments segments={inv.findingSegments} onInspectFact={onInspectFact} />
+              </p>
+              <p className="leading-snug text-[#43564A]">
+                <RawTextSegments segments={inv.causeSegments} onInspectFact={onInspectFact} />
+              </p>
+            </div>
+          )}
           {/* Stock threshold note if present */}
           {vm?.currentCoverFact && vm.alarmCoverFact && (
             <p className="p-2.5 rounded-lg bg-[#FFFDF7] border border-[#EFE8D6] text-[#25372C]">

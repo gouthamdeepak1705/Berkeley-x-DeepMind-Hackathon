@@ -8,6 +8,9 @@ import {
   BuiltToolRecord,
   CardReaction,
   CardVisualMetrics,
+  DayByDayChartEvent,
+  DayByDayChartPoint,
+  DayByDayEventKind,
   DoneForYouItem,
   Fact,
   MoneyAccountData,
@@ -181,15 +184,38 @@ function isStoreProvenOnDate(params: {
   );
 }
 
+function resolveReactionStoreIds(rx: CardReaction, sim: SimulationRun): StoreId[] {
+  if (rx.storeIds && rx.storeIds.length > 0) {
+    return [...rx.storeIds];
+  }
+  const cid = rx.candidateId;
+  if (cid.includes('refund')) return ['walnut_creek'];
+  if (cid.startsWith('rollout:')) return ['santana_row'];
+  if (cid.includes('best_sellers')) {
+    const low = (['union_square', 'palo_alto', 'santana_row'] as StoreId[]).filter(
+      (sid) => (sim.storeRecordsByDate[rx.date]?.[sid]?.groups.best_sellers.weeksOfCover ?? 99) < 3.0,
+    );
+    return low.length > 0 ? low : ['union_square', 'palo_alto', 'santana_row'];
+  }
+  if (cid.includes('knitwear')) {
+    const low = (['walnut_creek', 'pasadena', 'napa'] as StoreId[]).filter(
+      (sid) => (sim.storeRecordsByDate[rx.date]?.[sid]?.groups.knitwear.weeksOfCover ?? 99) < 3.0,
+    );
+    return low;
+  }
+  return [];
+}
+
 function classifyDayLossReason(params: {
   day: string;
   storeId: StoreId;
   kind: CellKind;
+  sim: SimulationRun;
   decisions: ActionDecision[];
   reactions: CardReaction[];
   dismissedStockStores?: Record<string, string[]>;
 }): string {
-  const { day, storeId, kind, decisions, reactions } = params;
+  const { day, storeId, kind, sim, decisions, reactions } = params;
 
   if (kind === 'refunds') {
     const activeSwitch = decisions.find(
@@ -284,7 +310,13 @@ function classifyDayLossReason(params: {
   const dismissedKeys = params.dismissedStockStores?.[kind] ?? [];
   if (
     dismissedKeys.includes(storeId) &&
-    reactions.some((r) => r.reaction === 'dismiss' && r.date <= day && matchesCand(r.candidateId))
+    reactions.some(
+      (r) =>
+        r.reaction === 'dismiss' &&
+        r.date <= day &&
+        matchesCand(r.candidateId) &&
+        resolveReactionStoreIds(r, sim).includes(storeId),
+    )
   ) {
     return 'after you dismissed the warning';
   }
@@ -293,7 +325,8 @@ function classifyDayLossReason(params: {
     (r) =>
       r.reaction === 'not_now' &&
       r.date <= day &&
-      (r.candidateId.includes(kind) || (r.candidateId.startsWith('rollout:') && kind === 'best_sellers')),
+      (r.candidateId.includes(kind) || (r.candidateId.startsWith('rollout:') && kind === 'best_sellers')) &&
+      resolveReactionStoreIds(r, sim).includes(storeId),
   );
   if (deferredBefore) {
     return 'waiting, after you chose Not now';
@@ -304,12 +337,13 @@ function classifyDayLossReason(params: {
 
 function summarizeProblemDecision(params: {
   problemId: string;
+  sim: SimulationRun;
   decisions: ActionDecision[];
   reactions: CardReaction[];
   doneForYou: DoneForYouItem[];
   date: string;
 }): { statusLabel: string; decisionLabel: string } {
-  const { problemId, decisions, reactions, doneForYou, date } = params;
+  const { problemId, sim, decisions, reactions, doneForYou, date } = params;
 
   if (problemId === 'walnut_creek_refunds') {
     const sw = decisions.find(
@@ -411,14 +445,19 @@ function summarizeProblemDecision(params: {
     (r) =>
       r.reaction === 'dismiss' &&
       r.date <= date &&
-      (r.candidateId === candPrefix || r.candidateId.includes(targetStores[0])),
+      (r.candidateId === candPrefix || r.candidateId.includes(targetStores[0])) &&
+      resolveReactionStoreIds(r, sim).some((sid) => targetStores.includes(sid)),
   );
   if (dis && (groupId === 'best_sellers' || dis.date >= '2026-09-24')) {
     return { statusLabel: 'Dismissed', decisionLabel: `Dismissed (${formatShortDate(dis.date)})` };
   }
 
   const def = reactions.find(
-    (r) => r.reaction === 'not_now' && r.date <= date && r.candidateId === candPrefix,
+    (r) =>
+      r.reaction === 'not_now' &&
+      r.date <= date &&
+      r.candidateId === candPrefix &&
+      resolveReactionStoreIds(r, sim).some((sid) => targetStores.includes(sid)),
   );
   if (def) {
     return { statusLabel: 'Waiting', decisionLabel: `Chose Not now (${formatShortDate(def.date)})` };
@@ -448,6 +487,7 @@ export function buildMoneyAccountData(params: {
   builtTools: BuiltToolRecord[];
   watcherEvalLog: WatcherEvalRecord[];
   dismissedStockStores?: Record<string, string[]>;
+  openSituationStoresByCandidate?: Record<string, StoreId[]>;
   signalsCheckedCount?: number;
   askedOwnerCount?: number;
 }): MoneyAccountData {
@@ -462,6 +502,7 @@ export function buildMoneyAccountData(params: {
     noticedAndLetGo,
     builtTools,
     dismissedStockStores,
+    openSituationStoresByCandidate,
   } = params;
 
   const baselineSim = getBaselineSimulation(seed);
@@ -508,6 +549,7 @@ export function buildMoneyAccountData(params: {
             day: d,
             storeId: cell.storeId,
             kind: cell.kind,
+            sim,
             decisions,
             reactions,
             dismissedStockStores,
@@ -604,6 +646,7 @@ export function buildMoneyAccountData(params: {
     const probProof = combineProofTag(probProofs);
     const { statusLabel, decisionLabel } = summarizeProblemDecision({
       problemId: spec.problemId,
+      sim,
       decisions,
       reactions,
       doneForYou,
@@ -619,7 +662,7 @@ export function buildMoneyAccountData(params: {
       probProof === 'proven'
         ? 'Proven against the store held back for comparison'
         : probProof === 'mixed'
-          ? 'Two treated stores proven against the held-out store; third store measured before and after'
+          ? 'Two treated stores proven against the store held back; third store measured before and after'
           : probProof === 'likely'
             ? 'Likely, not proven: measured before and after at one store'
             : probWithout === 0
@@ -763,20 +806,52 @@ export function buildMoneyAccountData(params: {
     }
   }
 
-  // Build Warnings you turned down (not_now or dismiss that are not currently fixed by an active decision)
+  // Build Warnings you turned down (scoped per episode/store set, never overwritten by a later card at other stores)
   const turnedDownWarnings: TurnedDownWarningItem[] = [];
-  const latestReactionByCand = new Map<string, CardReaction>();
-  for (const rx of reactions) {
-    if (rx.date > date) continue;
+  interface TurnedDownEpisode {
+    key: string;
+    candidateId: string;
+    reaction: 'not_now' | 'dismiss';
+    reactionDate: string;
+    reason?: CardReaction['reason'];
+    storeIds: StoreId[];
+  }
+  const activeEpisodes: TurnedDownEpisode[] = [];
+  const sortedRx = [...reactions]
+    .filter((r) => r.date <= date)
+    .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? -1 : 1));
+  for (const rx of sortedRx) {
+    const rxStores = resolveReactionStoreIds(rx, sim);
     if (rx.reaction === 'not_now' || rx.reaction === 'dismiss') {
-      latestReactionByCand.set(rx.candidateId, rx);
+      const epKey = `${rx.candidateId}::${[...rxStores].sort().join(',')}`;
+      const ep: TurnedDownEpisode = {
+        key: epKey,
+        candidateId: rx.candidateId,
+        reaction: rx.reaction,
+        reactionDate: rx.date,
+        reason: rx.reason,
+        storeIds: rxStores,
+      };
+      const existingIdx = activeEpisodes.findIndex((e) => e.key === epKey);
+      if (existingIdx >= 0) {
+        activeEpisodes[existingIdx] = ep;
+      } else {
+        activeEpisodes.push(ep);
+      }
     } else if (rx.reaction === 'approve') {
-      latestReactionByCand.delete(rx.candidateId);
+      for (let i = activeEpisodes.length - 1; i >= 0; i--) {
+        const ep = activeEpisodes[i];
+        if (ep.candidateId !== rx.candidateId) continue;
+        ep.storeIds = ep.storeIds.filter((sid) => !rxStores.includes(sid));
+        if (ep.storeIds.length === 0) {
+          activeEpisodes.splice(i, 1);
+        }
+      }
     }
   }
 
-  for (const rx of latestReactionByCand.values()) {
-    const cid = rx.candidateId;
+  for (const ep of activeEpisodes) {
+    const cid = ep.candidateId;
     const isRefund = cid.includes('refund');
     const isBestSellers = cid.includes('best_sellers') || cid.startsWith('rollout:');
     const isKnitwear = cid.includes('knitwear');
@@ -788,7 +863,7 @@ export function buildMoneyAccountData(params: {
       if (hasSwitch) continue;
       let lossSince = 0;
       for (const d of liveDatesUpToToday) {
-        if (d < rx.date) continue;
+        if (d < ep.reactionDate) continue;
         lossSince += actualRefundMap.get(d) ?? 0;
       }
       const recent7Refunds = liveDatesUpToToday
@@ -799,72 +874,58 @@ export function buildMoneyAccountData(params: {
       turnedDownWarnings.push({
         candidateId: cid,
         title: 'Cash refunds with no matching sale at Walnut Creek',
-        reaction: rx.reaction as 'not_now' | 'dismiss',
-        reactionDate: rx.date,
+        reaction: ep.reaction,
+        reactionDate: ep.reactionDate,
         dismissReasonLabel:
-          rx.reason === 'not_important'
+          ep.reason === 'not_important'
             ? 'Not important'
-            : rx.reason === 'already_known'
+            : ep.reason === 'already_known'
               ? 'Already known'
-              : rx.reason === 'wrong'
+              : ep.reason === 'wrong'
                 ? 'Wrong'
-                : rx.reason === 'not_mine'
+                : ep.reason === 'not_mine'
                   ? 'Not mine'
                   : undefined,
         isReRaised: raised.some((r) => r.candidateId === cid),
         weeklyStakeFact: createFact(
-          `td:${cid}:weekly:${date}`,
+          `td:${ep.key}:weekly:${date}`,
           'Weekly cash refunds at risk',
           recent7Refunds,
           'USD',
           `Cash refunds with no matching sale at Walnut Creek over the last 7 days ending ${date}.`,
         ),
         lostSinceTurnedDownFact: createFact(
-          `td:${cid}:lost:${date}`,
+          `td:${ep.key}:lost:${date}`,
           'Lost since you turned this down',
           Math.round(lossSince),
           'USD',
-          `Actual unlinked cash refunds at Walnut Creek from ${rx.date} through ${date}.`,
+          `Actual unlinked cash refunds at Walnut Creek from ${ep.reactionDate} through ${date}.`,
         ),
         byStore: [
           {
             storeId: 'walnut_creek',
             storeName: 'Walnut Creek',
             lostFact: createFact(
-              `td:${cid}:walnut_creek:lost:${date}`,
+              `td:${ep.key}:walnut_creek:lost:${date}`,
               'Walnut Creek loss since warning turned down',
               Math.round(lossSince),
               'USD',
-              `Actual cash refunds with no matching sale at Walnut Creek from ${rx.date} through ${date}.`,
+              `Actual cash refunds with no matching sale at Walnut Creek from ${ep.reactionDate} through ${date}.`,
             ),
           },
         ],
       });
     } else if (isBestSellers || isKnitwear) {
       const gid: 'best_sellers' | 'knitwear' = isBestSellers ? 'best_sellers' : 'knitwear';
-      const storeIds: StoreId[] = isBestSellers
-        ? cid.startsWith('rollout:')
-          ? ['santana_row']
-          : ['union_square', 'palo_alto', 'santana_row']
-        : rx.reaction === 'dismiss' && (dismissedStockStores?.knitwear?.length ?? 0) > 0
-          ? (dismissedStockStores!.knitwear as StoreId[]).filter((sid) =>
-              decisions.every(
-                (d) =>
-                  !(
-                    d.kind === 'transfer' &&
-                    d.groupId === 'knitwear' &&
-                    !d.undoneOnDate &&
-                    d.date <= date &&
-                    (d.transferLines ?? []).some((l) => l.toStoreId === sid)
-                  ),
-              ),
-            )
-          : ['walnut_creek', 'pasadena', 'napa'].filter(
-              (sid) =>
-                (sim.storeRecordsByDate[rx.date]?.[sid as StoreId]?.groups.knitwear.weeksOfCover ?? 99) < 3.0,
-            ) as StoreId[];
+      const sitStores = openSituationStoresByCandidate?.[cid];
+      const baseStores: StoreId[] =
+        ep.storeIds.length > 0
+          ? ep.storeIds
+          : sitStores && sitStores.length > 0
+            ? sitStores
+            : [];
 
-      const unapprovedStores = storeIds.filter(
+      const unapprovedStores = baseStores.filter(
         (sid) =>
           !decisions.some(
             (d) =>
@@ -880,7 +941,7 @@ export function buildMoneyAccountData(params: {
       const byStore = unapprovedStores.map((sid) => {
         let storeLoss = 0;
         for (const d of liveDatesUpToToday) {
-          if (d < rx.date) continue;
+          if (d < ep.reactionDate) continue;
           const rec = sim.storeRecordsByDate[d]?.[sid];
           if (!rec || !rec.isOpen) continue;
           storeLoss += Math.max(0, rec.groups[gid].potentialSales - rec.groups[gid].actualSales);
@@ -893,11 +954,11 @@ export function buildMoneyAccountData(params: {
           storeId: sid,
           storeName: STORE_MAP[sid].name,
           lostFact: createFact(
-            `td:${cid}:${sid}:lost:${date}`,
+            `td:${ep.key}:${sid}:lost:${date}`,
             `${STORE_MAP[sid].name} lost sales since warning turned down`,
             Math.round(storeLoss),
             'USD',
-            `Lost ${gid === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} sales at ${STORE_MAP[sid].name} from ${rx.date} through ${date}.`,
+            `Lost ${gid === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} sales at ${STORE_MAP[sid].name} from ${ep.reactionDate} through ${date}.`,
           ),
         };
       });
@@ -908,40 +969,48 @@ export function buildMoneyAccountData(params: {
         return s + (rec ? rec.groups[gid].potentialSales * 7 : 0);
       }, 0);
 
+      const matchesRaisedStore = raised.some(
+        (r) =>
+          r.candidateId === cid &&
+          (!r.stores ||
+            r.stores.length === 0 ||
+            r.stores.some((s) => unapprovedStores.includes(s.storeId))),
+      );
+
       turnedDownWarnings.push({
         candidateId: cid,
         title:
           gid === 'best_sellers'
             ? cid.startsWith('rollout:')
-              ? 'Best-sellers running out at Santana Row'
-              : 'Best-sellers running out at three big stores'
-            : `Knitwear running out at ${unapprovedStores.map((id) => STORE_MAP[id].name).join(', ')}`,
-        reaction: rx.reaction as 'not_now' | 'dismiss',
-        reactionDate: rx.date,
+              ? 'Best-sellers running low at Santana Row'
+              : `Best-sellers running low at ${unapprovedStores.map((id) => STORE_MAP[id].name).join(', ')}`
+            : `Knitwear running low at ${unapprovedStores.map((id) => STORE_MAP[id].name).join(', ')}`,
+        reaction: ep.reaction,
+        reactionDate: ep.reactionDate,
         dismissReasonLabel:
-          rx.reason === 'not_important'
+          ep.reason === 'not_important'
             ? 'Not important'
-            : rx.reason === 'already_known'
+            : ep.reason === 'already_known'
               ? 'Already known'
-              : rx.reason === 'wrong'
+              : ep.reason === 'wrong'
                 ? 'Wrong'
-                : rx.reason === 'not_mine'
+                : ep.reason === 'not_mine'
                   ? 'Not mine'
                   : undefined,
-        isReRaised: raised.some((r) => r.candidateId === cid),
+        isReRaised: matchesRaisedStore,
         weeklyStakeFact: createFact(
-          `td:${cid}:weekly:${date}`,
+          `td:${ep.key}:weekly:${date}`,
           'Weekly sales at risk',
           totalWeeklyStake,
           'USD',
           `Estimated weekly ${gid === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} sales across unfixed stores on ${date}.`,
         ),
         lostSinceTurnedDownFact: createFact(
-          `td:${cid}:lost:${date}`,
+          `td:${ep.key}:lost:${date}`,
           'Lost since you turned this down',
           totalLost,
           'USD',
-          `Actual lost sales across ${unapprovedStores.map((id) => STORE_MAP[id].name).join(', ')} from ${rx.date} through ${date}.`,
+          `Actual lost sales across ${unapprovedStores.map((id) => STORE_MAP[id].name).join(', ')} from ${ep.reactionDate} through ${date}.`,
         ),
         byStore,
       });
@@ -964,6 +1033,22 @@ export function buildMoneyAccountData(params: {
     0,
   );
   const toolsBuilt = builtTools.filter((t) => t.installedOn <= date).length;
+
+  // Part B: Day by Day Chart (Sales + Money series + axis events strictly <= date)
+  const { dayByDayPoints, dayByDayEvents } = buildDayByDayData({
+    sim,
+    baselineSim,
+    liveDatesUpToToday,
+    baselineRefundMap,
+    actualRefundMap,
+    decisions,
+    reactions,
+    doneForYou,
+    noticedAndLetGo,
+    watcherEvalLog: params.watcherEvalLog,
+    autonomyReactions: params.autonomyReactions,
+    builtTools,
+  });
 
   return {
     asOfDate: date,
@@ -990,17 +1075,17 @@ export function buildMoneyAccountData(params: {
     ),
     savedProvenFact: createFact(
       `money:saved_proven:${date}`,
-      'Proven savings',
+      'From proven actions',
       totalProvenUsd,
       'USD',
-      `Savings at stores where a held-out comparison store proved the transfer worked through ${date}.`,
+      `Proven in a test against the store held back for comparison; this amount is estimated from the difference between running with and without Opscien through ${date}.`,
     ),
     savedLikelyFact: createFact(
       `money:saved_likely:${date}`,
-      'Likely savings (not proven)',
+      'From likely actions',
       totalLikelyUsd,
       'USD',
-      `Savings measured before and after at one store (no held-out comparison store) through ${date}.`,
+      `Measured before and after at one store (not tested against a store held back for comparison); estimated from running with and without Opscien through ${date}.`,
     ),
     atRiskNowFact: createFact(
       `money:at_risk:${date}`,
@@ -1056,7 +1141,203 @@ export function buildMoneyAccountData(params: {
         `Custom store tools written and verified in a sandbox through ${date}.`,
       ),
     },
+    dayByDayPoints,
+    dayByDayEvents,
   };
+}
+
+function buildDayByDayData(params: {
+  sim: SimulationRun;
+  baselineSim: SimulationRun;
+  liveDatesUpToToday: string[];
+  baselineRefundMap: Map<string, number>;
+  actualRefundMap: Map<string, number>;
+  decisions: ActionDecision[];
+  reactions: CardReaction[];
+  doneForYou: DoneForYouItem[];
+  noticedAndLetGo: NoticedAndLetGoItem[];
+  watcherEvalLog: WatcherEvalRecord[];
+  autonomyReactions: AutonomyReaction[];
+  builtTools: BuiltToolRecord[];
+}): {
+  dayByDayPoints: DayByDayChartPoint[];
+  dayByDayEvents: DayByDayChartEvent[];
+} {
+  const {
+    sim,
+    baselineSim,
+    liveDatesUpToToday,
+    baselineRefundMap,
+    actualRefundMap,
+    decisions,
+    reactions,
+    doneForYou,
+    noticedAndLetGo,
+    watcherEvalLog,
+    autonomyReactions,
+    builtTools,
+  } = params;
+
+  const allCells = PROBLEM_SPECS.flatMap((p) => p.cells);
+  const rawWithoutByCell = new Array<number>(allCells.length).fill(0);
+  const rawLostByCell = new Array<number>(allCells.length).fill(0);
+
+  const dayByDayPoints: DayByDayChartPoint[] = [];
+  const dayByDayEvents: DayByDayChartEvent[] = [];
+
+  // Map distinct quiet groups by date
+  const quietByDate = new Map<string, Map<string, NoticedAndLetGoItem>>();
+  for (const lg of noticedAndLetGo) {
+    let m = quietByDate.get(lg.date);
+    if (!m) {
+      m = new Map();
+      quietByDate.set(lg.date, m);
+    }
+    if (!m.has(lg.groupSummaryKey)) {
+      m.set(lg.groupSummaryKey, lg);
+    }
+  }
+
+  for (const d of liveDatesUpToToday) {
+    const dIdx = sim.dates.indexOf(d);
+    let sales7dWith = 0;
+    let sales7dWithout = 0;
+    for (let k = Math.max(0, dIdx - 6); k <= dIdx; k++) {
+      const kd = sim.dates[k];
+      const wRecs = sim.storeRecordsByDate[kd];
+      const woRecs = baselineSim.storeRecordsByDate[kd];
+      for (const st of STORES) {
+        if (wRecs?.[st.id]?.isOpen) sales7dWith += wRecs[st.id].actualSales;
+        if (woRecs?.[st.id]?.isOpen) sales7dWithout += woRecs[st.id].actualSales;
+      }
+    }
+
+    let dayWithoutUsd = 0;
+    let dayLostUsd = 0;
+    for (let c = 0; c < allCells.length; c++) {
+      const cell = allCells[c];
+      rawWithoutByCell[c] += getCellDailyLoss(
+        baselineSim,
+        d,
+        cell.storeId,
+        cell.kind,
+        baselineRefundMap,
+      );
+      rawLostByCell[c] += getCellDailyLoss(sim, d, cell.storeId, cell.kind, actualRefundMap);
+      dayWithoutUsd += Math.round(rawWithoutByCell[c]);
+      dayLostUsd += Math.round(rawLostByCell[c]);
+    }
+    const daySavedUsd = dayWithoutUsd - dayLostUsd;
+
+    dayByDayPoints.push({
+      date: d,
+      sales7dWithOpscien: Math.round(sales7dWith),
+      sales7dWithoutOpscien: Math.round(sales7dWithout),
+      withoutOpscienUsd: dayWithoutUsd,
+      lostSoFarUsd: dayLostUsd,
+      savedSoFarUsd: daySavedUsd,
+    });
+
+    // Summarize significant event on date `d` (1 dot per notable day: acted > raised > quiet)
+    const dayDecs = decisions.filter((dec) => dec.date === d && !dec.undoneOnDate);
+    const dayAutoEnabled = autonomyReactions.find(
+      (ar) => ar.date === d && ar.reaction === 'enable_autonomy',
+    );
+    const dayBuilt = builtTools.find((t) => t.installedOn === d);
+    const dayProven = doneForYou.find((dfy) => dfy.closedOn === d && dfy.verdict === 'worked_proven');
+    const dayRaises = watcherEvalLog.filter((w) => w.date === d && w.decisionChoice === 'raise_now');
+    const dayRx = reactions.filter((r) => r.date === d);
+    const dayQuietGroups = Array.from(quietByDate.get(d)?.values() ?? []);
+
+    let kind: DayByDayEventKind | null = null;
+    let title = '';
+    let summary = '';
+
+    if (dayDecs.length > 0 || dayAutoEnabled || dayBuilt || dayProven) {
+      kind = 'acted';
+      if (dayDecs.some((dec) => dec.kind === 'refund_switch')) {
+        title = 'Refund desk and $50 rule';
+        summary = 'Built the Walnut Creek refund desk and turned on manager approval over $50.';
+      } else if (dayDecs.some((dec) => dec.isAutonomous)) {
+        const autoDec = dayDecs.find((dec) => dec.isAutonomous)!;
+        const toStore = autoDec.transferLines?.[0]?.toStoreName ?? 'the store';
+        title = `Sent stock to ${toStore} automatically`;
+        summary = `Handled ${toStore} Knitwear shortage automatically (${(autoDec.totalUnits ?? 0).toLocaleString('en-US')} units within your 500-unit rule).`;
+      } else if (dayDecs.some((dec) => Boolean(dec.parentDecisionId))) {
+        title = 'Proved and sent the rest';
+        summary = `Proved the test against ${dayDecs[0]?.holdoutStoreName ?? 'Santana Row'} and approved sending the remaining Best-sellers stock.`;
+      } else if (dayDecs.some((dec) => dec.kind === 'transfer')) {
+        const tDec = dayDecs.find((dec) => dec.kind === 'transfer')!;
+        title = tDec.groupId === 'best_sellers' ? 'Approved Best-sellers move' : 'Approved Knitwear move';
+        summary = tDec.holdoutStoreName
+          ? `Approved moving ${(tDec.totalUnits ?? 0).toLocaleString('en-US')} units while holding ${tDec.holdoutStoreName} back to compare.`
+          : `Approved moving ${(tDec.totalUnits ?? 0).toLocaleString('en-US')} units from stores with spare stock.`;
+      } else if (dayAutoEnabled) {
+        title = 'Earned automatic rule';
+        summary = 'Three transfers worked in a row, so you allowed automatic transfers under 500 units.';
+      } else if (dayProven) {
+        title = 'Proved against comparison store';
+        summary = dayProven.verdictSentence;
+      } else if (dayBuilt) {
+        title = 'Built store refund desk';
+        summary = 'Built and verified the Walnut Creek refund desk across three sandbox tests.';
+      }
+    } else if (dayRaises.length > 0 || dayRx.length > 0) {
+      kind = 'raised';
+      const latestDis = dayRx.find((r) => r.reaction === 'dismiss');
+      const latestNotNow = dayRx.find((r) => r.reaction === 'not_now');
+      if (latestDis) {
+        title = 'Warning dismissed';
+        summary = `You dismissed a warning on ${formatShortDate(d)}.`;
+      } else if (latestNotNow) {
+        title = 'Put aside (Not now)';
+        summary = `You chose Not now on ${formatShortDate(d)}; Opscien kept watching daily.`;
+      } else {
+        const firstRaise = dayRaises[0];
+        const situationLabel = firstRaise.situationId.includes('best_sellers')
+          ? 'Best-sellers running out'
+          : firstRaise.situationId.includes('knitwear')
+            ? 'Knitwear running out'
+            : firstRaise.situationId.includes('refunds')
+              ? 'Cash refunds at Walnut Creek'
+              : 'this warning';
+        title = 'Raised warning for your decision';
+        summary = `Opscien checked ${situationLabel.toLowerCase()} and asked you to decide.`;
+      }
+    } else if (dayQuietGroups.length > 0) {
+      kind = 'quiet';
+      const primaryQuiet = dayQuietGroups[0];
+      title = 'Checked and stayed quiet';
+      summary = primaryQuiet.reason;
+    }
+
+    if (kind) {
+      dayByDayEvents.push({
+        date: d,
+        kind,
+        title,
+        summary,
+        facts: [
+          createFact(
+            `dbd:${d}:sales7d`,
+            `7-day sales on ${formatShortDate(d)}`,
+            Math.round(sales7dWith),
+            'USD',
+            `Actual 7-day sales across all open stores through ${d} ($${Math.round(sales7dWith).toLocaleString('en-US')}) vs without Opscien ($${Math.round(sales7dWithout).toLocaleString('en-US')}).`,
+          ),
+          createFact(
+            `dbd:${d}:saved`,
+            `Saved so far through ${formatShortDate(d)}`,
+            daySavedUsd,
+            'USD',
+            `Lost without Opscien ($${dayWithoutUsd.toLocaleString('en-US')}) minus Lost so far ($${dayLostUsd.toLocaleString('en-US')}) through ${d}.`,
+          ),
+        ],
+      });
+    }
+  }
+
+  return { dayByDayPoints, dayByDayEvents };
 }
 
 export function computeProofBarDataForDecision(params: {
@@ -1187,8 +1468,29 @@ export function computeCardVisualMetrics(params: {
       };
     }).sort((a, b) => b.refundRateFact.value - a.refundRateFact.value);
 
+    const wcRow = rows.find((r) => r.storeId === 'walnut_creek');
+    const peerValues = rows
+      .filter((r) => r.storeId !== 'walnut_creek')
+      .map((r) => r.refundRateFact.value)
+      .sort((a, b) => a - b);
+    const mid = Math.floor(peerValues.length / 2);
+    const peerMedian =
+      peerValues.length === 0
+        ? 0
+        : peerValues.length % 2 === 1
+          ? peerValues[mid]
+          : (peerValues[mid - 1] + peerValues[mid]) / 2;
+
     return {
       refundStoreComparison: rows,
+      walnutCreekRefundRateFact: wcRow?.refundRateFact,
+      peerRefundRateFact: createFact(
+        `vis:${item.candidateId}:peer_ref:${date}`,
+        'Other 7 stores typical 28-day refund rate',
+        peerMedian,
+        'share_percent',
+        `Typical 28-day refund rate across the other 7 stores open more than 18 months through ${date}.`,
+      ),
     };
   }
 
@@ -1227,16 +1529,50 @@ export function computeCardVisualMetrics(params: {
     const projectionDays = emptyShelfDays !== null && emptyShelfDays > 0 ? emptyShelfDays : 28;
     const doNothingUsd = (weeklyStake / 7) * projectionDays;
 
+    // Spare stores count and total spare units above each store's own safety floor
+    const nextAnyDel = sim.scheduledDeliveries
+      .filter((d) => d.groupId === gid && d.date > date)
+      .sort((a, b) => a.date.localeCompare(b.date))[0];
+    const daysUntilAnyDel = nextAnyDel ? Math.max(1, diffDays(date, nextAnyDel.date)) : null;
+    const donorFloorWeeks = Math.max(8, daysUntilAnyDel !== null ? daysUntilAnyDel / 7 + 1 : 0);
+    const avgPrice = gid === 'best_sellers' ? 120 : 90;
+    const grpShare = gid === 'best_sellers' ? 0.35 : 0.15;
+    const receiverSet = new Set<StoreId>((item.stores ?? []).map((s) => s.storeId));
+
+    let spareStoreCount = 0;
+    let spareTotalUnits = 0;
+    for (const st of STORES) {
+      const rec = sim.storeRecordsByDate[date]?.[st.id];
+      if (!rec || !rec.isOpen) continue;
+      if (receiverSet.has(st.id)) continue;
+      const gs = rec.groups[gid];
+      const cov = gs.weeksOfCover ?? 0;
+      const baselineW = (st.baseDailySales * 7 * grpShare * 1.06) / avgPrice;
+      const avgW = cov > 0.01 ? gs.endingStock / cov : baselineW;
+      const donorDemand = Math.max(avgW, baselineW);
+      const spare = Math.floor(gs.endingStock - donorFloorWeeks * donorDemand);
+      if (spare >= 10) {
+        spareStoreCount += 1;
+        spareTotalUnits += spare;
+      }
+    }
+
     let proofBarData: CardVisualMetrics['proofBarData'] | undefined;
     if (item.isRollout && item.parentDecisionId) {
       const parentDec = decisions.find((d) => d.id === item.parentDecisionId);
       const parentDone = doneForYou.find((d) => d.decisionId === item.parentDecisionId);
       if (parentDec && parentDone) {
-        proofBarData = computeProofBarDataForDecision({
+        const computedBar = computeProofBarDataForDecision({
           sim,
           decision: parentDec,
           closedOn: parentDone.closedOn,
         });
+        if (computedBar) {
+          proofBarData = {
+            ...computedBar,
+            provenGainFact: parentDone.provenMoneyFact,
+          };
+        }
       }
     }
 
@@ -1282,14 +1618,29 @@ export function computeCardVisualMetrics(params: {
               `${daysUntilDelivery} days until next delivery minus ${daysLeft} days of stock left.`,
             )
           : undefined,
-      doNothingLossFact: createFact(
-        `vis:${item.candidateId}:donothing:${date}`,
-        'Expected lost sales if you do nothing',
-        doNothingUsd,
-        'USD',
+      doNothingLossFact:
         daysUntilDelivery !== null
-          ? `Estimated sales lost across affected stores over ${projectionDays} days of empty shelves based on current weekly demand.`
-          : `Estimated sales lost over the next 4 weeks at current pace if stock runs out and nothing is transferred.`,
+          ? createFact(
+              `vis:${item.candidateId}:donothing:${date}`,
+              'Expected lost sales if you do nothing',
+              doNothingUsd,
+              'USD',
+              `Estimated sales lost across affected stores over ${projectionDays} days of empty shelves based on current weekly demand.`,
+            )
+          : undefined,
+      spareStoreCountFact: createFact(
+        `vis:${item.candidateId}:spare_cnt:${date}`,
+        'Stores with spare stock',
+        spareStoreCount,
+        'count',
+        `Number of open stores on ${date} holding at least 10 spare ${gid === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} units above their own safety limit.`,
+      ),
+      spareTotalUnitsFact: createFact(
+        `vis:${item.candidateId}:spare_units:${date}`,
+        'Spare units at other stores',
+        spareTotalUnits,
+        'units',
+        `Total spare ${gid === 'best_sellers' ? 'Best-sellers' : 'Knitwear'} units across ${spareStoreCount} stores above each store's own safety limit on ${date}.`,
       ),
       proofBarData,
     };

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp, Loader2, RotateCcw, ShieldCheck } from 'lucide-react';
 import { formatShortDate } from '../../engine/calendar';
 import { createFact } from '../../engine/facts';
@@ -18,8 +18,7 @@ import {
 import { InlineBuiltRefundToolCard } from './InlineBuiltRefundToolCard';
 import { ProofPill, toSimpleEnglish } from './SimpleHelpers';
 import { SimpleProblemCard } from './SimpleProblemCard';
-import { TeamPanel } from './TeamPanel';
-import { ProofComparisonVisual } from './VisualDiagrams';
+import { ProofComparisonVisual, TransferFlowVisual } from './VisualDiagrams';
 
 interface SimpleOwnerFeedProps {
   dayState: DayState;
@@ -31,6 +30,7 @@ interface SimpleOwnerFeedProps {
   builderErrorByCandidate: Record<string, BuilderErrorState>;
   demoHighlight: DemoHighlightState | null;
   isTourMode?: boolean;
+  forceQuietOpen?: boolean;
   onInspectFact: (fact: Fact) => void;
   onApproveCard: (candidateId: string) => void;
   onNotNowCard: (candidateId: string) => void;
@@ -62,6 +62,7 @@ export function SimpleOwnerFeed({
   builderErrorByCandidate,
   demoHighlight,
   isTourMode = false,
+  forceQuietOpen = false,
   onInspectFact,
   onApproveCard,
   onNotNowCard,
@@ -79,6 +80,13 @@ export function SimpleOwnerFeed({
   const [quietOpen, setQuietOpen] = useState(false);
   const [showAllQuiet, setShowAllQuiet] = useState(false);
   const [openQuietIds, setOpenQuietIds] = useState<Record<string, boolean>>({});
+  const [trackRecordOpen, setTrackRecordOpen] = useState(false);
+
+  useEffect(() => {
+    if (forceQuietOpen) {
+      setQuietOpen(true);
+    }
+  }, [forceQuietOpen]);
 
   const inProgress = dayState.inProgress ?? [];
   const doneForYou = dayState.doneForYou ?? [];
@@ -133,13 +141,46 @@ export function SimpleOwnerFeed({
               <Loader2 className="w-4 h-4 animate-spin shrink-0" />
               <span>Checking {toSimpleEnglish(activeInvestigation.title)}.</span>
             </div>
-            {activeInvestigation.steps.length > 0 && (
-              <ul className="space-y-1 pl-5 text-xs text-[#56695D] list-disc">
-                {activeInvestigation.steps.map((s, idx) => (
-                  <li key={`step-${idx}`}>{toSimpleEnglish(s)}</li>
-                ))}
-              </ul>
-            )}
+            {activeInvestigation.steps.length > 0 && (() => {
+              const simpleSteps: string[] = [];
+              for (const raw of activeInvestigation.steps) {
+                const lower = raw.toLowerCase();
+                let mapped: string | null = null;
+                if (lower.includes('second check') || lower.includes('python')) {
+                  mapped = 'Checking the figures a second way.';
+                } else if (
+                  lower.includes('calendar') ||
+                  lower.includes('lfl') ||
+                  lower.includes('running') ||
+                  lower.includes('opening') ||
+                  lower.includes('recent') ||
+                  lower.includes('cover') ||
+                  lower.includes('refund') ||
+                  lower.includes('finding')
+                ) {
+                  mapped = 'Checking the calendar and the data.';
+                } else if (
+                  lower.includes('investigat') ||
+                  lower.includes('cause') ||
+                  lower.includes('transfer') ||
+                  lower.includes('planning')
+                ) {
+                  mapped = 'Finding the cause.';
+                } else {
+                  mapped = 'Finding the cause.';
+                }
+                if (mapped && !simpleSteps.includes(mapped)) {
+                  simpleSteps.push(mapped);
+                }
+              }
+              return simpleSteps.length > 0 ? (
+                <ul className="space-y-1 pl-5 text-xs text-[#56695D] list-disc">
+                  {simpleSteps.map((s, idx) => (
+                    <li key={`step-${idx}`}>{s}</li>
+                  ))}
+                </ul>
+              ) : null;
+            })()}
           </div>
         )}
 
@@ -147,6 +188,7 @@ export function SimpleOwnerFeed({
         {pendingOffer && (
           <article
             data-testid="autonomy-offer-card"
+            data-tour-target="autonomy_offer"
             className="simple-card-enter bg-[#EEF6F0] border-2 border-[#25372C] rounded-2xl p-4 sm:p-5 space-y-3 shadow-2xs"
           >
             <div className="flex items-baseline justify-between gap-2">
@@ -245,24 +287,21 @@ export function SimpleOwnerFeed({
         )}
       </section>
 
-      {/* Section 2: In progress */}
-      <section aria-labelledby="simple-in-progress" className="space-y-2.5">
-        <div className="flex items-baseline justify-between gap-2">
-          <h2 id="simple-in-progress" className="text-base font-semibold text-[#25372C]">
-            In progress
-          </h2>
-          {inProgress.length > 0 && (
+      {/* Section 2: In progress (hidden when empty) */}
+      {inProgress.length > 0 && (
+        <section aria-labelledby="simple-in-progress" className="space-y-2.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 id="simple-in-progress" className="text-base font-semibold text-[#25372C]">
+              In progress
+            </h2>
             <span className="text-xs text-[#56695D]">{inProgress.length} active</span>
-          )}
-        </div>
-        {inProgress.length === 0 ? (
-          <p className="text-sm text-[#56695D]">Nothing in progress right now.</p>
-        ) : (
+          </div>
           <ul className="space-y-2.5">
-            {inProgress.map((act) => (
+            {inProgress.map((act, idx) => (
               <li
                 key={act.decisionId}
-                className="simple-card-enter bg-white border border-[#E5DCC7] rounded-2xl p-4 text-xs space-y-2"
+                data-tour-target={act.transferPlan || idx === 0 ? 'in_progress_transfer' : undefined}
+                className="simple-card-enter bg-white border border-[#E5DCC7] rounded-2xl p-4 text-xs space-y-2.5"
               >
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="text-sm font-semibold text-[#25372C]">
@@ -273,6 +312,9 @@ export function SimpleOwnerFeed({
                   </span>
                 </div>
                 <p className="text-[#43564A] leading-snug">{toSimpleEnglish(act.measure)}</p>
+                {act.transferPlan && (
+                  <TransferFlowVisual plan={act.transferPlan} onInspectFact={onInspectFact} />
+                )}
                 {(act.beforeRefundRateFact || act.afterRefundRateFact) && (
                   <p className="text-[#43564A]">
                     {act.beforeRefundRateFact && (
@@ -306,30 +348,31 @@ export function SimpleOwnerFeed({
               </li>
             ))}
           </ul>
-        )}
-      </section>
+        </section>
+      )}
 
-      {/* Section 3: Done for you */}
-      <section aria-labelledby="simple-done-for-you" className="space-y-2.5">
-        <div className="flex items-baseline justify-between gap-2">
-          <h2 id="simple-done-for-you" className="text-base font-semibold text-[#25372C]">
-            Done for you
-          </h2>
-          {doneForYou.length > 0 && (
-            <span className="text-xs text-[#56695D]">{doneForYou.length} finished</span>
-          )}
-        </div>
-
-        {dayState.lostAutonomyReason && (
-          <div className="p-3.5 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] text-xs text-[#78350F]">
-            {toSimpleEnglish(dayState.lostAutonomyReason)}
+      {/* Section 3: Done for you (hidden when empty) */}
+      {(doneForYou.length > 0 ||
+        Boolean(dayState.lostAutonomyReason) ||
+        Boolean(refundTool && !refundSwitchNeedsTurnOn)) && (
+        <section aria-labelledby="simple-done-for-you" className="space-y-2.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 id="simple-done-for-you" className="text-base font-semibold text-[#25372C]">
+              Done for you
+            </h2>
+            {doneForYou.length > 0 && (
+              <span className="text-xs text-[#56695D]">{doneForYou.length} finished</span>
+            )}
           </div>
-        )}
 
-        {doneForYou.length === 0 ? (
-          <p className="text-sm text-[#56695D]">No completed actions yet.</p>
-        ) : (
-          <ul className="space-y-3">
+          {dayState.lostAutonomyReason && (
+            <div className="p-3.5 rounded-xl bg-[#FFFBEB] border border-[#FDE68A] text-xs text-[#78350F]">
+              {toSimpleEnglish(dayState.lostAutonomyReason)}
+            </div>
+          )}
+
+          {doneForYou.length > 0 && (
+            <ul className="space-y-3">
             {doneForYou.map((item) => {
               const proofBar = dayState.doneForYouProofBars?.[item.decisionId];
               const proofTag = verdictToProofTag(item.verdict);
@@ -465,26 +508,27 @@ export function SimpleOwnerFeed({
                 </li>
               );
             })}
-          </ul>
-        )}
+            </ul>
+          )}
 
-        {/* Inline built refund desk after switch is active */}
-        {refundTool && !refundSwitchNeedsTurnOn && (
-          <InlineBuiltRefundToolCard
-            tool={refundTool}
-            rows={dayState.refundRows ?? []}
-            switchEnabled={Boolean(dayState.refundSwitchEnabled)}
-            reviewedIds={dayState.reviewedRefundIds ?? []}
-            unreviewedFact={dayState.toolUnreviewedFact}
-            isBusy={isRequestInFlight}
-            demoHighlight={demoHighlight}
-            highlightBadgeText={highlightBadgeText}
-            onInspectFact={onInspectFact}
-            onToggleReviewed={onToggleRefundReviewed}
-            onApproveRefundSwitch={onApproveRefundSwitch}
-          />
-        )}
-      </section>
+          {/* Inline built refund desk after switch is active */}
+          {refundTool && !refundSwitchNeedsTurnOn && (
+            <InlineBuiltRefundToolCard
+              tool={refundTool}
+              rows={dayState.refundRows ?? []}
+              switchEnabled={Boolean(dayState.refundSwitchEnabled)}
+              reviewedIds={dayState.reviewedRefundIds ?? []}
+              unreviewedFact={dayState.toolUnreviewedFact}
+              isBusy={isRequestInFlight}
+              demoHighlight={demoHighlight}
+              highlightBadgeText={highlightBadgeText}
+              onInspectFact={onInspectFact}
+              onToggleReviewed={onToggleRefundReviewed}
+              onApproveRefundSwitch={onApproveRefundSwitch}
+            />
+          )}
+        </section>
+      )}
 
       {/* Section 4: Warnings you turned down (appears once Not now or Dismiss was clicked) */}
       {turnedDownWarnings.length > 0 && (
@@ -499,7 +543,7 @@ export function SimpleOwnerFeed({
           <ul className="space-y-2.5">
             {turnedDownWarnings.map((tw) => (
               <li
-                key={`${tw.candidateId}-${tw.reactionDate}`}
+                key={`${tw.candidateId}-${tw.reactionDate}-${tw.byStore.map((b) => b.storeId).join('_')}`}
                 className="bg-white border border-[#EBD2CC] rounded-2xl p-4 text-xs space-y-2"
               >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -541,76 +585,102 @@ export function SimpleOwnerFeed({
         </section>
       )}
 
-      {/* Track record */}
+      {/* Track record (collapsed by default to one summary bar) */}
       {dayState.autonomyRecord && (
-        <section aria-labelledby="simple-track-record" className="space-y-2.5">
-          <h2 id="simple-track-record" className="text-base font-semibold text-[#25372C]">
-            Track record
-          </h2>
-          <div className="bg-white border border-[#E5DCC7] rounded-2xl p-4 text-xs space-y-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-semibold text-sm text-[#25372C]">
-                {dayState.autonomyRecord.kindLabel}
-              </span>
-              <span className="px-2.5 py-0.5 rounded-md border border-[#D8CEB8] bg-[#FFFDF7] text-[#25372C] font-medium">
-                {toSimpleEnglish(dayState.autonomyRecord.levelLabel)}
-              </span>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 rounded-xl bg-[#FFFDF7] border border-[#EFE8D6]">
-              <div>
-                <p className="text-[#56695D]">Cases</p>
-                <p className="mt-0.5 font-semibold text-[#25372C]">
-                  <FactValue
-                    fact={dayState.autonomyRecord.casesFact}
-                    onInspect={onInspectFact}
-                    noPlus
-                    plainFont
-                  />
+        <section aria-labelledby="simple-track-record">
+          <div className="bg-white border border-[#E5DCC7] rounded-2xl text-xs overflow-hidden">
+            <button
+              type="button"
+              data-testid="track-record-toggle"
+              aria-expanded={trackRecordOpen}
+              onClick={() => setTrackRecordOpen((v) => !v)}
+              className="w-full px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-left hover:bg-[#FFFDF7] cursor-pointer"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 id="simple-track-record" className="text-sm font-semibold text-[#25372C]">
+                  Track record
+                </h2>
+                <span className="text-[#56695D]">· {dayState.autonomyRecord.kindLabel}</span>
+                <span className="px-2 py-0.5 rounded-md border border-[#D8CEB8] bg-[#FFFDF7] text-[#25372C] font-medium">
+                  {toSimpleEnglish(dayState.autonomyRecord.levelLabel)}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-[#56695D]">
+                <span>
+                  {dayState.autonomyRecord.workedFact.value} of{' '}
+                  {dayState.autonomyRecord.casesFact.value} worked
+                </span>
+                {trackRecordOpen ? (
+                  <ChevronUp className="w-4 h-4" />
+                ) : (
+                  <ChevronDown className="w-4 h-4" />
+                )}
+              </div>
+            </button>
+
+            {trackRecordOpen && (
+              <div className="px-4 pb-4 pt-2 border-t border-[#EFE8D6] space-y-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 rounded-xl bg-[#FFFDF7] border border-[#EFE8D6]">
+                  <div>
+                    <p className="text-[#56695D]">Cases</p>
+                    <p className="mt-0.5 font-semibold text-[#25372C]">
+                      <FactValue
+                        fact={dayState.autonomyRecord.casesFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[#56695D]">Worked</p>
+                    <p className="mt-0.5 font-semibold text-[#25372C]">
+                      <FactValue
+                        fact={dayState.autonomyRecord.workedFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[#56695D]">Proven with comparison</p>
+                    <p className="mt-0.5 font-semibold text-[#25372C]">
+                      <FactValue
+                        fact={dayState.autonomyRecord.provenFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[#56695D]">Total gain</p>
+                    <p className="mt-0.5 font-semibold text-[#15803D]">
+                      <FactValue
+                        fact={dayState.autonomyRecord.pooledMoneyFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                    </p>
+                  </div>
+                </div>
+                <p className="text-[#56695D] leading-snug">
+                  Rule to act alone: {toSimpleEnglish(dayState.autonomyRecord.earnRuleText)}
                 </p>
               </div>
-              <div>
-                <p className="text-[#56695D]">Worked</p>
-                <p className="mt-0.5 font-semibold text-[#25372C]">
-                  <FactValue
-                    fact={dayState.autonomyRecord.workedFact}
-                    onInspect={onInspectFact}
-                    noPlus
-                    plainFont
-                  />
-                </p>
-              </div>
-              <div>
-                <p className="text-[#56695D]">Proven with comparison</p>
-                <p className="mt-0.5 font-semibold text-[#25372C]">
-                  <FactValue
-                    fact={dayState.autonomyRecord.provenFact}
-                    onInspect={onInspectFact}
-                    noPlus
-                    plainFont
-                  />
-                </p>
-              </div>
-              <div>
-                <p className="text-[#56695D]">Total gain</p>
-                <p className="mt-0.5 font-semibold text-[#15803D]">
-                  <FactValue
-                    fact={dayState.autonomyRecord.pooledMoneyFact}
-                    onInspect={onInspectFact}
-                    noPlus
-                    plainFont
-                  />
-                </p>
-              </div>
-            </div>
-            <p className="text-[#56695D] leading-snug">
-              Rule to act alone: {toSimpleEnglish(dayState.autonomyRecord.earnRuleText)}
-            </p>
+            )}
           </div>
         </section>
       )}
 
       {/* Section 5: Noticed, checked, and stayed quiet */}
-      <section aria-labelledby="simple-quiet" className="space-y-2.5">
+      <section
+        aria-labelledby="simple-quiet"
+        data-tour-target="quiet"
+        className="space-y-2.5"
+      >
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -677,7 +747,7 @@ export function SimpleOwnerFeed({
                               <div key={it.candidateId} className="space-y-0.5">
                                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                                   <span className="font-medium text-[#25372C]">
-                                    {it.storeName ?? 'All established stores'} (
+                                    {it.storeName ?? 'All stores open more than 18 months'} (
                                     {formatShortDate(it.date)})
                                   </span>
                                   <span className="text-[#56695D]">
@@ -720,13 +790,6 @@ export function SimpleOwnerFeed({
           </div>
         )}
       </section>
-
-      {/* Three helpers strip */}
-      <TeamPanel
-        dayState={dayState}
-        activeInvestigation={activeInvestigation}
-        builderProgressByCandidate={builderProgressByCandidate}
-      />
     </div>
   );
 }

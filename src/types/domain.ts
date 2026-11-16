@@ -425,6 +425,25 @@ export interface WorkCountersData {
   toolsBuiltFact: Fact;
 }
 
+export interface DayByDayChartPoint {
+  date: string;
+  sales7dWithOpscien: number;
+  sales7dWithoutOpscien: number;
+  withoutOpscienUsd: number;
+  lostSoFarUsd: number;
+  savedSoFarUsd: number;
+}
+
+export type DayByDayEventKind = 'quiet' | 'raised' | 'acted';
+
+export interface DayByDayChartEvent {
+  date: string;
+  kind: DayByDayEventKind;
+  title: string;
+  summary: string;
+  facts: Fact[];
+}
+
 export interface MoneyAccountData {
   asOfDate: string;
   withoutOpscienFact: Fact;
@@ -437,6 +456,8 @@ export interface MoneyAccountData {
   byStore: MoneyStoreBreakdown[];
   turnedDownWarnings: TurnedDownWarningItem[];
   workCounters: WorkCountersData;
+  dayByDayPoints?: DayByDayChartPoint[];
+  dayByDayEvents?: DayByDayChartEvent[];
 }
 
 export interface CardVisualMetrics {
@@ -446,6 +467,10 @@ export interface CardVisualMetrics {
   doNothingLossFact?: Fact;
   currentCoverFact?: Fact;
   alarmCoverFact?: Fact;
+  spareStoreCountFact?: Fact;
+  spareTotalUnitsFact?: Fact;
+  walnutCreekRefundRateFact?: Fact;
+  peerRefundRateFact?: Fact;
   proofBarData?: {
     treatedNames: string;
     holdoutName: string;
@@ -455,6 +480,7 @@ export interface CardVisualMetrics {
     holdoutExpectedSalesFact: Fact;
     treatedPctFact: Fact;
     holdoutPctFact: Fact;
+    provenGainFact?: Fact;
   };
   refundStoreComparison?: Array<{
     storeId: StoreId;
@@ -550,6 +576,7 @@ export interface CardReaction {
   reaction: 'approve' | 'not_now' | 'dismiss';
   reason?: DismissReason;
   detail?: string;
+  storeIds?: StoreId[];
 }
 
 export interface ActionDecision {
@@ -599,6 +626,7 @@ export interface InProgressAction {
   beforeRefundRateFact?: Fact;
   afterRefundRateFact?: Fact;
   isSimulatedTask?: boolean;
+  transferPlan?: TransferPlan;
 }
 
 export interface DoneForYouItem {

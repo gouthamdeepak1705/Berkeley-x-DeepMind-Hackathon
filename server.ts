@@ -24,6 +24,7 @@ import {
   getGeminiCapBanner,
   getGeminiPlaybackMode,
   getGeminiUsageSummary,
+  getLiveCallsInFlight,
   runConnectionTests,
   setGeminiPlaybackMode,
 } from './src/gemini/client';
@@ -43,6 +44,7 @@ import {
   DismissReason,
   InvestigationResult,
   RaisedItem,
+  StoreId,
   TraceEntry,
 } from './src/types/domain';
 
@@ -93,6 +95,10 @@ async function startServer() {
 
   app.get('/api/gemini/stats', (_req, res) => {
     res.json(getGeminiUsageSummary());
+  });
+
+  app.get('/api/gemini/live-status', (_req, res) => {
+    res.json({ liveCallsInFlight: getLiveCallsInFlight() });
   });
 
   app.get('/api/gemini/mode', (_req, res) => {
@@ -256,7 +262,8 @@ async function startServer() {
                 (r) =>
                   r.candidateId === candidateId &&
                   (r.reaction === 'approve' || r.reaction === 'dismiss') &&
-                  r.date >= st.firstDetectedOn,
+                  r.date >= st.firstDetectedOn &&
+                  (!r.storeIds || r.storeIds.length === 0 || r.storeIds.includes(st.storeId)),
               ),
             );
           }
@@ -505,12 +512,25 @@ async function startServer() {
         return;
       }
 
+      const approveStoreIds: StoreId[] | undefined = targetItem.transferPlan
+        ? Array.from(
+            new Set([
+              ...targetItem.transferPlan.receiverStoreIds,
+              ...(targetItem.stores ?? []).map((s) => s.storeId),
+            ]),
+          )
+        : targetItem.stores && targetItem.stores.length > 0
+          ? targetItem.stores.map((s) => s.storeId)
+          : targetItem.detectorKind === 'refunds_out_of_line'
+            ? ['walnut_creek']
+            : undefined;
       const newReaction: CardReaction = {
         id: `react:${targetItem.candidateId}:${currentDate}:approve:${reactions.length}`,
         candidateId: targetItem.candidateId,
         date: currentDate,
         dayIndex,
         reaction: 'approve',
+        storeIds: approveStoreIds,
         detail: gwResult.preview?.summary ?? `Approved ${targetItem.title}`,
       };
       const updatedDecisions = [...decisions, gwResult.decision];
@@ -708,8 +728,25 @@ async function startServer() {
       const reviewedRefundIds = Array.isArray(body.reviewedRefundIds) ? body.reviewedRefundIds : [];
       const builderTraceEntries = Array.isArray(body.builderTraceEntries) ? body.builderTraceEntries : [];
 
-      const sim = runSimulation(seed, decisions);
-      const date = sim.liveDates[Math.max(0, Math.min(sim.liveDates.length - 1, dayIndex))];
+      const preStep = await evaluateStage2UpToDay({
+        seed,
+        targetDayIndex: dayIndex,
+        decisions,
+        reactions,
+        autonomyReactions,
+        investigateTargetDay: false,
+        providedInvestigations: provided,
+        builtTools,
+        reviewedRefundIds,
+        builderTraceEntries,
+      });
+      const date = preStep.dayState.date;
+      const targetItem = preStep.dayState.raised.find((r) => r.candidateId === body.candidateId);
+      const reactStoreIds: StoreId[] | undefined =
+        targetItem?.stores && targetItem.stores.length > 0
+          ? targetItem.stores.map((s) => s.storeId)
+          : targetItem?.transferPlan?.receiverStoreIds ??
+            (body.candidateId.includes('refund') ? ['walnut_creek'] : undefined);
       const newReaction: CardReaction = {
         id: `react:${body.candidateId}:${date}:${body.reaction}:${reactions.length}`,
         candidateId: body.candidateId,
@@ -717,6 +754,7 @@ async function startServer() {
         dayIndex,
         reaction: body.reaction,
         reason: body.reason,
+        storeIds: reactStoreIds,
       };
       const updatedReactions = [...reactions, newReaction];
 
@@ -1136,6 +1174,7 @@ async function startServer() {
         date,
         dayIndex,
         reaction: 'approve',
+        storeIds: ['walnut_creek'],
         detail: `Installed ${body.builtTool.title} after passing all 3 sandbox tests.`,
       };
       const updatedReactions = [...reactions, newReaction];

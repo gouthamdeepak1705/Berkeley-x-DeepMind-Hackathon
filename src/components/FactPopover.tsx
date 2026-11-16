@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
 import { Fact } from '../types/domain';
 import { formatPlainFactText } from './FactValue';
+import { toSimpleEnglish } from './simple/SimpleHelpers';
 
 interface FactPopoverProps {
   fact: Fact | null;
@@ -14,12 +15,14 @@ export function FactPopover({ fact, plainFont = false, onClose }: FactPopoverPro
   const display = plainFont
     ? formatPlainFactText(fact, { noPlus: true })
     : fact.formatted;
+  const labelDisplay = plainFont ? toSimpleEnglish(fact.label) : fact.label;
+  const noteDisplay = plainFont ? toSimpleEnglish(fact.note) : fact.note;
 
   return (
     <div
       role="dialog"
       aria-modal="false"
-      aria-label={`Fact details for ${fact.label}`}
+      aria-label={`Fact details for ${labelDisplay}`}
       className={`fixed bottom-4 right-4 left-4 sm:left-auto sm:w-[400px] z-50 bg-white rounded-xl shadow-lg p-5 ${
         plainFont
           ? 'border border-[#D8CEB8] text-[#25372C] font-sans'
@@ -29,7 +32,7 @@ export function FactPopover({ fact, plainFont = false, onClose }: FactPopoverPro
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className={`text-xs font-medium ${plainFont ? 'text-[#56695D]' : 'text-[#78716C]'}`}>
-            {fact.label}
+            {labelDisplay}
           </p>
           <p
             className={`mt-1 text-2xl font-semibold tabular-nums ${
@@ -54,7 +57,7 @@ export function FactPopover({ fact, plainFont = false, onClose }: FactPopoverPro
           plainFont ? 'text-[#43564A]' : 'text-[#57534E]'
         }`}
       >
-        {fact.note}
+        {noteDisplay}
       </p>
 
       {!plainFont && (

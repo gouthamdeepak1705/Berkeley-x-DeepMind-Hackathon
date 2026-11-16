@@ -494,3 +494,234 @@ test('Part A & F: Not now on Best-sellers tracks growing turnedDownWarnings spli
     clearTimelineSnapshotCache();
   }
 });
+
+test('Stage 7 A.2: Dismissing Walnut Creek knitwear keeps Walnut Creek in Warnings turned down with non-zero loss and does not leak Dismissed label to Pasadena or Napa', async () => {
+  const prevKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = '';
+  clearTimelineSnapshotCache();
+  clearGeminiMemoryCache();
+  loadRecordedRunFromDisk();
+  setGeminiPlaybackMode('replay');
+
+  try {
+    const baseSim = runSimulation(DEFAULT_SEED);
+    const idx = (d: string) => baseSim.liveDates.indexOf(d);
+
+    const bsPlan = buildTransferPlanForGroup({ sim: baseSim, date: '2026-09-08', groupId: 'best_sellers' }).plan;
+    const bsGw = executeActionThroughGateway(
+      {
+        candidateId: 'situation:stock_running_out:best_sellers',
+        date: '2026-09-08',
+        kind: 'transfer',
+        groupId: 'best_sellers',
+        title: `${bsPlan.groupName} transfer`,
+        measure: bsPlan.measure,
+        ownerApproved: true,
+        plan: bsPlan,
+      },
+      baseSim,
+    );
+    assert.ok(bsGw.ok && bsGw.decision);
+
+    const decisions: ActionDecision[] = [bsGw.decision];
+    const reactions: CardReaction[] = [
+      {
+        id: 'r:bs',
+        candidateId: 'situation:stock_running_out:best_sellers',
+        date: '2026-09-08',
+        dayIndex: idx('2026-09-08'),
+        reaction: 'approve',
+      },
+      {
+        id: 'r:dismiss-wc',
+        candidateId: 'situation:stock_running_out:knitwear',
+        date: '2026-09-25',
+        dayIndex: idx('2026-09-25'),
+        reaction: 'dismiss',
+        reason: 'not_important',
+        storeIds: ['walnut_creek'],
+      },
+    ];
+
+    const oct15 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-10-15'),
+      decisions,
+      reactions,
+      investigateTargetDay: true,
+    });
+
+    // Pasadena Knitwear must raise as a new card even though Walnut Creek was dismissed
+    const pasCard = oct15.dayState.raised.find(
+      (r) => r.candidateId === 'situation:stock_running_out:knitwear',
+    );
+    assert.ok(pasCard, 'Pasadena Knitwear should raise as a new card on Oct 15');
+    assert.ok(pasCard.stores?.some((s) => s.storeId === 'pasadena'));
+    assert.ok(!pasCard.stores?.some((s) => s.storeId === 'walnut_creek'));
+
+    const tdOct15 = oct15.dayState.moneyAccount!.turnedDownWarnings;
+    const wcEntry = tdOct15.find(
+      (w) => w.candidateId === 'situation:stock_running_out:knitwear' && w.byStore.some((b) => b.storeId === 'walnut_creek'),
+    );
+    assert.ok(wcEntry, 'Walnut Creek entry must stay in turnedDownWarnings');
+    assert.equal(wcEntry.title, 'Knitwear running low at Walnut Creek');
+    assert.ok(wcEntry.lostSinceTurnedDownFact.value > 0, 'Walnut Creek dismissed loss must be > 0');
+    assert.ok(!wcEntry.byStore.some((b) => b.storeId === 'pasadena'), 'Pasadena must not merge into Walnut Creek dismissed entry');
+
+    const nov14 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-11-14'),
+      decisions,
+      reactions,
+      investigateTargetDay: true,
+    });
+
+    const maNov14 = nov14.dayState.moneyAccount!;
+    const wcProb = maNov14.byProblem.find((p) => p.problemId === 'walnut_creek_knitwear')!;
+    const wcProbStore = wcProb.stores.find((s) => s.storeId === 'walnut_creek')!;
+    const pasProb = maNov14.byProblem.find((p) => p.problemId === 'pasadena_knitwear');
+    const napaProb = maNov14.byProblem.find((p) => p.problemId === 'napa_knitwear');
+
+    const wcTurnedNov14 = maNov14.turnedDownWarnings.find(
+      (w) => w.candidateId === 'situation:stock_running_out:knitwear' && w.byStore.some((b) => b.storeId === 'walnut_creek'),
+    )!;
+    assert.equal(
+      wcTurnedNov14.lostSinceTurnedDownFact.value,
+      wcProbStore.lostSoFarFact.value,
+      'Turned down loss must equal Lost breakdown loss for Walnut Creek',
+    );
+    if (pasProb) {
+      assert.ok(!pasProb.lossReason.includes('Dismissed'), `Pasadena should not say Dismissed: ${pasProb.lossReason}`);
+    }
+    if (napaProb) {
+      assert.ok(!napaProb.lossReason.includes('Dismissed'), `Napa should not say Dismissed: ${napaProb.lossReason}`);
+    }
+  } finally {
+    process.env.GEMINI_API_KEY = prevKey;
+    clearTimelineSnapshotCache();
+  }
+});
+
+test('Stage 7 A.3 & A.4 & Part B: Reconciles 3,822 spare units on Sep 8, Rockridge donor on Sep 25, and builds exact Day by Day chart series', async () => {
+  const prevKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = '';
+  clearTimelineSnapshotCache();
+  clearGeminiMemoryCache();
+  loadRecordedRunFromDisk();
+  setGeminiPlaybackMode('replay');
+
+  try {
+    const baseSim = runSimulation(DEFAULT_SEED);
+    const idx = (d: string) => baseSim.liveDates.indexOf(d);
+
+    // Part B: Sep 7 has $0 without Opscien and $0 lost
+    const sep7 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-09-07'),
+      decisions: [],
+      reactions: [],
+      investigateTargetDay: false,
+    });
+    const sep7Points = sep7.dayState.moneyAccount!.dayByDayPoints!;
+    assert.equal(sep7Points.length, idx('2026-09-07') + 1);
+    const sep7Last = sep7Points[sep7Points.length - 1];
+    assert.equal(sep7Last.withoutOpscienUsd, 0);
+    assert.equal(sep7Last.lostSoFarUsd, 0);
+    assert.equal(sep7Last.savedSoFarUsd, 0);
+
+    // A.3: Sep 8 Best-sellers card top (3,822) matches Full analysis (3,822)
+    const sep8 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-09-08'),
+      decisions: [],
+      reactions: [],
+      investigateTargetDay: true,
+    });
+    const bsCard = sep8.dayState.raised.find(
+      (r) => r.candidateId === 'situation:stock_running_out:best_sellers',
+    )!;
+    assert.equal(bsCard.visualMetrics?.spareTotalUnitsFact?.value, 3822);
+    assert.equal(
+      bsCard.investigation?.factsById['tool:stock:donor_surplus:best_sellers:2026-09-08']?.value,
+      3822,
+    );
+    const sep8AllText =
+      (bsCard.investigation?.findingSegments ?? [])
+        .map((s) => (s.type === 'text' ? s.text : s.fact.formatted))
+        .join('') +
+      (bsCard.investigation?.causeSegments ?? [])
+        .map((s) => (s.type === 'text' ? s.text : s.fact.formatted))
+        .join('');
+    assert.ok(!sep8AllText.includes('5,178'), `Expected 5,178 to be reconciled to 3,822: ${sep8AllText}`);
+
+    // Approve Sep 8 so Santana Row becomes holdout, then check Sep 25 Knitwear donor is Rockridge (not Santana Row)
+    const bsGw = executeActionThroughGateway(
+      {
+        candidateId: bsCard.candidateId,
+        date: '2026-09-08',
+        kind: 'transfer',
+        groupId: 'best_sellers',
+        title: `${bsCard.transferPlan!.groupName} transfer`,
+        measure: bsCard.transferPlan!.measure,
+        ownerApproved: true,
+        plan: bsCard.transferPlan!,
+      },
+      sep8.sim,
+    );
+    assert.ok(bsGw.ok && bsGw.decision);
+
+    const sep25 = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-09-25'),
+      decisions: [bsGw.decision],
+      reactions: [
+        {
+          id: 'r:bs',
+          candidateId: bsCard.candidateId,
+          date: '2026-09-08',
+          dayIndex: idx('2026-09-08'),
+          reaction: 'approve',
+        },
+      ],
+      investigateTargetDay: true,
+    });
+    const wcCard = sep25.dayState.raised.find(
+      (r) => r.candidateId === 'situation:stock_running_out:knitwear',
+    )!;
+    assert.equal(wcCard.transferPlan?.transferLines[0]?.fromStoreName, 'Rockridge');
+    const wcInvText =
+      (wcCard.investigation?.outcomeDetail ?? '') +
+      (wcCard.investigation?.proposalSegments ?? [])
+        .map((s) => (s.type === 'text' ? s.text : s.fact.formatted))
+        .join('') +
+      (wcCard.investigation?.options ?? []).map((o) => o.description).join(' ');
+    assert.ok(!wcInvText.includes('Santana Row'), `Expected Santana Row donor to be rewritten to Rockridge: ${wcInvText}`);
+    assert.ok(wcInvText.includes('Rockridge'), `Expected Rockridge donor in Knitwear details: ${wcInvText}`);
+
+    // Part B: Check Not now on Sep 8 makes lostSoFar climb close to withoutOpscien
+    const oct20NoAction = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-10-20'),
+      decisions: [],
+      reactions: [
+        {
+          id: 'r:notnow:bs',
+          candidateId: 'situation:stock_running_out:best_sellers',
+          date: '2026-09-08',
+          dayIndex: idx('2026-09-08'),
+          reaction: 'not_now',
+        },
+      ],
+      investigateTargetDay: false,
+    });
+    const noActAccount = oct20NoAction.dayState.moneyAccount!;
+    const noActLast = noActAccount.dayByDayPoints![noActAccount.dayByDayPoints!.length - 1];
+    assert.equal(noActLast.withoutOpscienUsd, noActAccount.withoutOpscienFact.value);
+    assert.equal(noActLast.lostSoFarUsd, noActAccount.lostSoFarFact.value);
+    assert.ok(noActLast.lostSoFarUsd > 0 && noActLast.savedSoFarUsd === 0);
+  } finally {
+    process.env.GEMINI_API_KEY = prevKey;
+    clearTimelineSnapshotCache();
+  }
+});
+

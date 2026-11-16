@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { Fact, StoreBoardEntry, StoreBoardStatus } from '../../types/domain';
 import { FactValue } from '../FactValue';
-import { formatWholeUsd } from './SimpleHelpers';
 import { StoreDetailModal } from './StoreDetailModal';
 
 interface StoreBoardProps {
@@ -28,6 +27,13 @@ function statusStyles(status: StoreBoardStatus): string {
   }
 }
 
+function compactStatusLabel(status: StoreBoardStatus, rawLabel: string): string {
+  if (status === 'held_back') return 'Comparison';
+  if (status === 'stock_on_the_way') return 'On the way';
+  if (status === 'losing_sales') return 'Losing sales';
+  return rawLabel;
+}
+
 function StockMiniBar({
   label,
   fact,
@@ -39,9 +45,9 @@ function StockMiniBar({
 }) {
   if (!fact) {
     return (
-      <div className="flex items-center justify-between text-[11px] text-[#56695D]">
+      <div className="flex items-center justify-between text-[10px] text-[#56695D]">
         <span>{label}</span>
-        <span>Not open yet</span>
+        <span>Closed</span>
       </div>
     );
   }
@@ -52,9 +58,9 @@ function StockMiniBar({
   const low = weeks < 2.5;
 
   return (
-    <div className="space-y-0.5 text-[11px]">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[#56695D]">{label}</span>
+    <div className="space-y-0.5 text-[10px]">
+      <div className="flex items-center justify-between gap-1">
+        <span className="text-[#56695D] truncate">{label}</span>
         <span
           className={low ? 'font-semibold text-[#991B1B]' : 'text-[#25372C]'}
           onClick={(e) => e.stopPropagation()}
@@ -62,7 +68,7 @@ function StockMiniBar({
           <FactValue fact={fact} onInspect={onInspectFact} noPlus plainFont />
         </span>
       </div>
-      <div className="relative h-2 rounded-full bg-[#EFE8D6] overflow-hidden">
+      <div className="relative h-1.5 rounded-full bg-[#EFE8D6] overflow-hidden">
         <div
           className={`h-full rounded-full transition-all ${
             low ? 'bg-[#DC2626]' : 'bg-[#25372C]'
@@ -86,95 +92,59 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
 
   return (
     <>
-      <aside aria-labelledby="store-board-heading" className="space-y-3">
-        <div className="flex items-baseline justify-between gap-2">
-          <div>
-            <h2 id="store-board-heading" className="text-base font-semibold text-[#25372C]">
-              All 10 stores
-            </h2>
-            <p className="text-xs text-[#56695D]">
-              Largest stores first. Orange tick marks the 2.5 week alarm line.
-            </p>
-          </div>
+      <aside aria-labelledby="store-board-heading" className="space-y-2.5">
+        <div>
+          <h2 id="store-board-heading" className="text-base font-semibold text-[#25372C]">
+            All 10 stores
+          </h2>
+          <p className="text-xs text-[#56695D]">
+            Tap any store for detail. Orange line marks 2.5 weeks left.
+          </p>
         </div>
 
-        <ul className="space-y-2.5" data-testid="simple-store-board">
+        <ul
+          className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+          data-testid="simple-store-board"
+        >
           {stores.map((store) => (
             <li
               key={store.storeId}
               onClick={() => setSelectedStoreId(store.storeId)}
-              className="bg-white hover:bg-[#FFFDF7] border border-[#E5DCC7] rounded-2xl p-3.5 space-y-2.5 transition-colors cursor-pointer shadow-2xs"
+              className="bg-white hover:bg-[#FFFDF7] border border-[#E5DCC7] rounded-xl p-2.5 space-y-2 transition-colors cursor-pointer shadow-2xs"
             >
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedStoreId(store.storeId);
-                    }}
-                    className="text-sm font-semibold text-[#25372C] hover:underline text-left cursor-pointer"
-                  >
-                    {store.storeName}
-                  </button>
-                  <span
-                    className={`px-2 py-0.5 rounded-md border text-[11px] font-medium ${statusStyles(
-                      store.status,
-                    )}`}
-                  >
-                    {store.statusLabel}
-                  </span>
-                </div>
+              <div className="flex items-center justify-between gap-1.5">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedStoreId(store.storeId);
+                  }}
+                  className="text-xs font-semibold text-[#25372C] hover:underline text-left truncate cursor-pointer"
+                >
+                  {store.storeName}
+                </button>
+                <span
+                  title={store.statusLabel}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 ${statusStyles(
+                    store.status,
+                  )}`}
+                >
+                  {compactStatusLabel(store.status, store.statusLabel)}
+                </span>
+              </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <StockMiniBar
-                    label="Best-sellers"
-                    fact={store.bestSellersCoverFact}
-                    onInspectFact={onInspectFact}
-                  />
-                  <StockMiniBar
-                    label="Knitwear"
-                    fact={store.knitwearCoverFact}
-                    onInspectFact={onInspectFact}
-                  />
-                </div>
-
-                {store.isOpen && (
-                  <div
-                    className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[#EFE8D6] text-[11px] text-[#56695D]"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <span>
-                      7-day sales:{' '}
-                      <FactValue
-                        fact={store.sales7dActualFact}
-                        onInspect={onInspectFact}
-                        noPlus
-                        plainFont
-                        className="text-[#25372C] font-medium"
-                      />{' '}
-                      (expected{' '}
-                      <FactValue
-                        fact={store.sales7dExpectedFact}
-                        onInspect={onInspectFact}
-                        noPlus
-                        plainFont
-                      />
-                      )
-                    </span>
-                    <div className="flex items-center gap-2">
-                      {store.savedSoFarFact.value > 0 && (
-                        <span className="text-[#15803D] font-medium">
-                          Saved {formatWholeUsd(store.savedSoFarFact.value)}
-                        </span>
-                      )}
-                      {store.lostSoFarFact.value > 0 && (
-                        <span className="text-[#991B1B] font-medium">
-                          Lost {formatWholeUsd(store.lostSoFarFact.value)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
+              <div className="space-y-1.5">
+                <StockMiniBar
+                  label="Best-sellers"
+                  fact={store.bestSellersCoverFact}
+                  onInspectFact={onInspectFact}
+                />
+                <StockMiniBar
+                  label="Knitwear"
+                  fact={store.knitwearCoverFact}
+                  onInspectFact={onInspectFact}
+                />
+              </div>
             </li>
           ))}
         </ul>

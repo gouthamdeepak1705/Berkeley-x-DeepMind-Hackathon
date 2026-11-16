@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { DayState, Fact } from '../../types/domain';
 import { FactValue } from '../FactValue';
+import { DayByDayChartView } from './DayByDayChartCard';
 import { formatWholeUsd, ProofPill } from './SimpleHelpers';
 
 interface SimpleResultPageProps {
@@ -35,6 +36,7 @@ export function SimpleResultPage({
   return (
     <section
       data-testid="simple-result-page"
+      data-tour-target="result_page"
       aria-labelledby="simple-result-heading"
       className="bg-white border-2 border-[#25372C] rounded-2xl p-5 sm:p-7 space-y-6 shadow-xs"
     >
@@ -79,14 +81,14 @@ export function SimpleResultPage({
               />
             </p>
             <p className="mt-1 text-xs text-[#43564A]">
-              Proven:{' '}
+              From proven actions:{' '}
               <FactValue
                 fact={account.savedProvenFact}
                 onInspect={onInspectFact}
                 noPlus
                 plainFont
               />{' '}
-              · Likely:{' '}
+              · From likely actions:{' '}
               <FactValue
                 fact={account.savedLikelyFact}
                 onInspect={onInspectFact}
@@ -96,6 +98,19 @@ export function SimpleResultPage({
             </p>
           </div>
         </div>
+
+        {account.dayByDayPoints && account.dayByDayPoints.length > 0 && (
+          <div className="pt-4">
+            <DayByDayChartView
+              points={account.dayByDayPoints}
+              events={account.dayByDayEvents ?? []}
+              totalDays={dayState.totalDays}
+              mode="money"
+              currentDate={dayState.date}
+              onInspectFact={onInspectFact}
+            />
+          </div>
+        )}
       </div>
 
       {/* 2. Where the money was saved and lost */}
@@ -261,9 +276,10 @@ export function SimpleResultPage({
 
       {/* 6. Honesty note */}
       <div className="p-4 rounded-xl bg-[#FFF8E8] border border-[#E5DCC7] text-xs text-[#43564A] leading-relaxed">
-        <strong className="text-[#25372C]">Honesty note:</strong> Linden &amp; Rye is a simulated
-        10-store clothing business over 106 days. Real stores also face supplier delays, damaged
-        stock, and uneven local traffic. Every number here comes directly from the simulated
+        <strong className="text-[#25372C]">Honesty note:</strong> A real business cannot be run
+        twice. That is why Opscien holds one store back to prove a result. Linden &amp; Rye is a
+        simulated 10-store clothing business over 106 days. Real stores also face supplier delays,
+        damaged stock, and uneven local traffic. Every number here comes directly from the simulated
         till records and stock ledgers.
       </div>
 

@@ -10,6 +10,7 @@ import {
   RaisedItem,
   StoreId,
   TraceEntry,
+  TransferPlan,
 } from '../types/domain';
 
 export interface FollowUpEvaluationResult {
@@ -458,6 +459,45 @@ export function evaluateActionsUpToDate(params: {
       continue;
     }
 
+    const planForVisual: TransferPlan | undefined =
+      decision.transferLines && decision.transferLines.length > 0
+        ? {
+            groupId: (decision.groupId ?? 'best_sellers') as 'best_sellers' | 'knitwear',
+            groupName: grpLabel,
+            receiverStoreIds: holdoutId
+              ? [...treatedStoreIds, holdoutId]
+              : treatedStoreIds,
+            treatedStoreIds,
+            holdoutStoreId: decision.holdoutStoreId,
+            holdoutStoreName: decision.holdoutStoreName,
+            limitSentence:
+              'Each store with spare stock keeps enough to reach its own next delivery.',
+            nextDeliveryDate: null,
+            transferLines: decision.transferLines,
+            totalUnitsFact: createFact(
+              `inprog:${decision.id}:units`,
+              `${grpLabel} units moving`,
+              decision.totalUnits ??
+                decision.transferLines.reduce((s, l) => s + l.units, 0),
+              'units',
+              `Approved transfer of ${grpLabel} stock to ${toStoreNames}.`,
+            ),
+            arrivalDate,
+            weeklyRecoveryFact: createFact(
+              `inprog:${decision.id}:rec`,
+              'Expected weekly recovery',
+              decision.expectedWorthUsd ?? 0,
+              'USD',
+              `Estimated weekly demand protected at ${toStoreNames}.`,
+            ),
+            measure:
+              decision.measure ??
+              `Daily sales vs expected at ${toStoreNames}`,
+            proofEndDate: decision.proofEndDate ?? endDate,
+            requiresOwnerApproval: false,
+          }
+        : undefined;
+
     if (date < arrivalDate) {
       if (holdoutId) activeControlStores.add(holdoutId);
       const daysToArrive = diffDays(date, arrivalDate);
@@ -473,6 +513,7 @@ export function evaluateActionsUpToDate(params: {
         endDate,
         arrivalDate,
         holdoutStoreName: holdoutName,
+        transferPlan: planForVisual,
       });
       continue;
     }
@@ -608,6 +649,7 @@ export function evaluateActionsUpToDate(params: {
         arrivalDate,
         holdoutStoreName: holdoutName,
         latestGapPtsFact: latestGapFact,
+        transferPlan: planForVisual,
       });
       continue;
     }
