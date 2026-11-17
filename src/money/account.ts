@@ -919,11 +919,13 @@ export function buildMoneyAccountData(params: {
       const gid: 'best_sellers' | 'knitwear' = isBestSellers ? 'best_sellers' : 'knitwear';
       const sitStores = openSituationStoresByCandidate?.[cid];
       const baseStores: StoreId[] =
-        ep.storeIds.length > 0
-          ? ep.storeIds
-          : sitStores && sitStores.length > 0
-            ? sitStores
-            : [];
+        ep.reaction === 'not_now' && sitStores && sitStores.length > 0
+          ? Array.from(new Set([...ep.storeIds, ...sitStores]))
+          : ep.storeIds.length > 0
+            ? ep.storeIds
+            : sitStores && sitStores.length > 0
+              ? sitStores
+              : [];
 
       const unapprovedStores = baseStores.filter(
         (sid) =>
@@ -1202,12 +1204,16 @@ function buildDayByDayData(params: {
     const dIdx = sim.dates.indexOf(d);
     let sales7dWith = 0;
     let sales7dWithout = 0;
+    let sales7dExpected = 0;
     for (let k = Math.max(0, dIdx - 6); k <= dIdx; k++) {
       const kd = sim.dates[k];
       const wRecs = sim.storeRecordsByDate[kd];
       const woRecs = baselineSim.storeRecordsByDate[kd];
       for (const st of STORES) {
-        if (wRecs?.[st.id]?.isOpen) sales7dWith += wRecs[st.id].actualSales;
+        if (wRecs?.[st.id]?.isOpen) {
+          sales7dWith += wRecs[st.id].actualSales;
+          sales7dExpected += wRecs[st.id].expectedSales ?? wRecs[st.id].potentialSales;
+        }
         if (woRecs?.[st.id]?.isOpen) sales7dWithout += woRecs[st.id].actualSales;
       }
     }
@@ -1233,6 +1239,8 @@ function buildDayByDayData(params: {
       date: d,
       sales7dWithOpscien: Math.round(sales7dWith),
       sales7dWithoutOpscien: Math.round(sales7dWithout),
+      sales7dBandLow: Math.round(sales7dExpected * 0.92),
+      sales7dBandHigh: Math.round(sales7dExpected * 1.08),
       withoutOpscienUsd: dayWithoutUsd,
       lostSoFarUsd: dayLostUsd,
       savedSoFarUsd: daySavedUsd,

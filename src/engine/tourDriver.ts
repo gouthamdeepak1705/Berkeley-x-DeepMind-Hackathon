@@ -43,7 +43,7 @@ const STEP_SPECS: Array<Omit<TourStopSpec, 'targetDayIndex' | 'highlight'>> = [
     targetDate: '2026-08-17',
     title: 'It noticed, and stayed quiet',
     explanation:
-      'Normal summer dips happen every August. Opscien checked the calendar, ruled out a real problem, and did not wake you.',
+      'Normal summer dips happen every August. Opscien checked the calendar, ruled out a real problem, and did not wake you. Look at the chart: sales fell, but stayed inside the expected range.',
     scrollTarget: 'quiet',
     actionKind: 'advance_only',
   },
@@ -53,7 +53,7 @@ const STEP_SPECS: Array<Omit<TourStopSpec, 'targetDayIndex' | 'highlight'>> = [
     targetDate: '2026-09-08',
     title: 'It speaks',
     explanation:
-      'Two big stores will run out of Best-sellers before delivery. Opscien suggests moving spare stock while holding Santana Row back to prove it.',
+      'Two big stores will run out of Best-sellers before delivery. Opscien suggests moving spare stock while holding Santana Row back to prove it. Sales look healthy on the chart. The problem is stock, not sales.',
     scrollTarget: 'best_sellers_card',
     actionKind: 'approve_best_sellers',
   },
@@ -73,7 +73,7 @@ const STEP_SPECS: Array<Omit<TourStopSpec, 'targetDayIndex' | 'highlight'>> = [
     targetDate: '2026-09-27',
     title: 'It proves the result',
     explanation:
-      'Stores that got stock kept selling, while Santana Row dropped behind. With the gain proven, Opscien asks to send the rest now.',
+      'Stores that got stock kept selling, while Santana Row dropped behind. With the gain proven, Opscien asks to send the rest now. On the Money tab, the green area is what the transfer has saved so far.',
     scrollTarget: 'rollout_card',
     actionKind: 'approve_rollout',
   },
@@ -113,7 +113,7 @@ const STEP_SPECS: Array<Omit<TourStopSpec, 'targetDayIndex' | 'highlight'>> = [
     targetDate: '2026-11-14',
     title: 'The result',
     explanation:
-      'Opscien handled Pasadena and Napa automatically within your limits. Every dollar above compares running with Opscien against taking no action.',
+      'Opscien handled Pasadena and Napa automatically within your limits. Every dollar above compares running with Opscien against taking no action. The green area is everything Opscien saved.',
     scrollTarget: 'result_page',
     actionKind: 'finish',
   },

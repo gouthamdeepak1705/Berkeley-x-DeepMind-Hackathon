@@ -42,6 +42,8 @@ const ROLES: RoleConfig[] = [
 function stripTechnicalNoise(text: string): string {
   return toSimpleEnglish(
     text
+      .replace(/\b(?:routine|large)\s+kind\b\s*,?\s*/gi, '')
+      .replace(/\b(?:fast|thinking|pro)\s+model\b\s*,?\s*/gi, '')
       .replace(/Model\s+[a-z0-9._-]+/gi, '')
       .replace(/\bgemini-[a-z0-9._-]+/gi, '')
       .replace(/\bOpscien-[a-z0-9._-]+/gi, '')
@@ -55,7 +57,8 @@ function stripTechnicalNoise(text: string): string {
       )
       .replace(/\b(?:fact|tool|sit|situation|trace|dec|rollout|vis|td|money|work|sb|inprog|proof|proofbar|record):[a-z0-9_:-]+/gi, '')
       .replace(/\s*·\s*·\s*/g, ' · ')
-      .replace(/^\s*[·:\-]+\s*/, '')
+      .replace(/^\s*[·:\-,\s]+/, '')
+      .replace(/\s*[·:\-,\s]+$/, '')
       .replace(/\s{2,}/g, ' ')
       .trim(),
   );
@@ -75,12 +78,12 @@ export function formatTraceEntryForSimple(entry: TraceEntry): {
     if (lowerHead.includes('second check') || lowerHead.includes('python')) {
       if (lowerHead.includes('disagreed') || lowerDetail.includes('disagreed')) {
         return {
-          headline: `${datePrefix}. Checked the figure a second way.`,
+          headline: `${datePrefix}. Checked the figures a second way.`,
           detail: 'The two checks disagreed. Rechecking the store figures.',
         };
       }
       return {
-        headline: `${datePrefix}. Checked the figure a second way.`,
+        headline: `${datePrefix}. Checked the figures a second way.`,
         detail: 'Both agree.',
       };
     }
@@ -177,6 +180,18 @@ export function formatTraceEntryForSimple(entry: TraceEntry): {
   }
 
   if (entry.kind === 'investigation') {
+    if (lowerHead.includes('second check') || lowerHead.includes('python')) {
+      if (lowerHead.includes('disagreed') || lowerDetail.includes('disagreed')) {
+        return {
+          headline: `${datePrefix}. Checked the figures a second way.`,
+          detail: 'The two checks disagreed. Rechecking the store figures.',
+        };
+      }
+      return {
+        headline: `${datePrefix}. Checked the figures a second way.`,
+        detail: 'Both agree.',
+      };
+    }
     if (lowerHead.includes('let go')) {
       return {
         headline: `${datePrefix}. Checked and stayed quiet.`,

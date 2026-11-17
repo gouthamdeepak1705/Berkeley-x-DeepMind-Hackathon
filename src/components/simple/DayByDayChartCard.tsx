@@ -98,8 +98,10 @@ export function DayByDayChartView({
     minVal = Infinity;
     maxVal = -Infinity;
     for (const p of points) {
-      const lo = Math.min(p.sales7dWithOpscien, p.sales7dWithoutOpscien);
-      const hi = Math.max(p.sales7dWithOpscien, p.sales7dWithoutOpscien);
+      const bandLo = p.sales7dBandLow ?? p.sales7dWithOpscien;
+      const bandHi = p.sales7dBandHigh ?? p.sales7dWithOpscien;
+      const lo = Math.min(p.sales7dWithOpscien, p.sales7dWithoutOpscien, bandLo);
+      const hi = Math.max(p.sales7dWithOpscien, p.sales7dWithoutOpscien, bandHi);
       if (lo < minVal) minVal = lo;
       if (hi > maxVal) maxVal = hi;
     }
@@ -157,6 +159,21 @@ export function DayByDayChartView({
       active: c.protectedFill,
     })),
   );
+  const expectedBandCoords =
+    mode === 'sales'
+      ? points
+          .filter(
+            (p) =>
+              typeof p.sales7dBandLow === 'number' && typeof p.sales7dBandHigh === 'number',
+          )
+          .map((p) => ({
+            x: xForDate(p.date),
+            topY: yForValue(p.sales7dBandHigh!),
+            baseY: yForValue(p.sales7dBandLow!),
+            active: true,
+          }))
+      : [];
+  const expectedBandPath = buildPositiveFillPath(expectedBandCoords);
 
   const axisMarks = [
     { idx: 0, label: 'Aug 1', anchor: 'start' as const },
@@ -192,6 +209,10 @@ export function DayByDayChartView({
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-xs bg-[#16A34A]/30 border border-[#16A34A] inline-block" />
               <span className="text-[#14532D] font-medium">Sales Opscien protected</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-2.5 rounded-xs bg-[#D6D3D1]/70 border border-[#A8A29E]/60 inline-block" />
+              <span>Expected range</span>
             </span>
           </>
         ) : (
@@ -258,6 +279,11 @@ export function DayByDayChartView({
             stroke="#DFD5BE"
             strokeWidth="1"
           />
+
+          {/* Shaded expected range band (Sales tab) */}
+          {expectedBandPath && (
+            <path d={expectedBandPath} fill="#CBD5E1" opacity="0.42" />
+          )}
 
           {/* Shaded saved/protected area */}
           {greenFillPath && <path d={greenFillPath} fill="#16A34A" opacity="0.18" />}
@@ -459,6 +485,7 @@ export function DayByDayChartCard({
     <section
       aria-labelledby="day-by-day-heading"
       data-testid="day-by-day-chart-card"
+      data-tour-chart="true"
       className="bg-white border border-[#DFD5BE] rounded-2xl p-4 sm:p-5 space-y-3 shadow-2xs"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">

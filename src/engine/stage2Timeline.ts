@@ -671,26 +671,8 @@ function reconcileInvestigationDisplayFacts(
   if (!inv || item.isRollout) return item;
 
   let changed = false;
-  const spareFact = item.visualMetrics?.spareTotalUnitsFact;
   const plan = item.transferPlan ?? inv.transferPlan;
-
-  // A.3: Synchronize tool:stock:donor_surplus:* fact values with spareTotalUnitsFact (3,822 units vs 5,178)
-  const factsById: Record<string, Fact> = { ...inv.factsById };
-  let oldSpareFormatted: string | null = null;
-  if (spareFact) {
-    for (const [k, f] of Object.entries(factsById)) {
-      if (k.startsWith('tool:stock:donor_surplus:') && f.value !== spareFact.value) {
-        oldSpareFormatted = f.formatted;
-        factsById[k] = {
-          ...f,
-          value: spareFact.value,
-          formatted: spareFact.formatted,
-          note: spareFact.note,
-        };
-        changed = true;
-      }
-    }
-  }
+  const factsById: Record<string, Fact> = inv.factsById;
 
   // A.4: Synchronize excluded holdout donor mentions (e.g. Santana Row -> Rockridge on Sep 25)
   const donorNames = plan ? Array.from(new Set(plan.transferLines.map((l) => l.fromStoreName))) : [];
@@ -713,9 +695,6 @@ function reconcileInvestigationDisplayFacts(
 
   const rewriteText = (txt: string, allowDonorRename: boolean): string => {
     let out = txt;
-    if (spareFact && oldSpareFormatted && out.includes(oldSpareFormatted)) {
-      out = out.split(oldSpareFormatted).join(spareFact.formatted);
-    }
     if (allowDonorRename && donorListText && excludedHoldoutDonors.length > 0) {
       for (const wrongDonor of excludedHoldoutDonors) {
         const escaped = wrongDonor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

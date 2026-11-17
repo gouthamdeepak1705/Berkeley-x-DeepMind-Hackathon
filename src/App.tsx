@@ -15,6 +15,7 @@ import {
 import { RealityNoteModal } from './components/RealityNoteModal';
 import { SalesChart } from './components/SalesChart';
 import { GeminiTelemetrySnapshot, TracePanel } from './components/TracePanel';
+import { JudgeMode } from './components/judge/JudgeMode';
 import { DayByDayChartCard } from './components/simple/DayByDayChartCard';
 import { LiveWorkingBanner, toSimpleEnglish } from './components/simple/SimpleHelpers';
 import { MoneyBar } from './components/simple/MoneyBar';
@@ -73,12 +74,19 @@ function isTechnicalDefault(): boolean {
   return params.get('view') === 'technical';
 }
 
+function isJudgeDefault(): boolean {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get('view') === 'judge';
+}
+
 export default function App() {
   const baseTimeline = useMemo(() => buildLiveTimeline(DEFAULT_SEED), []);
   const diagnostics = useMemo(() => runFullDiagnostics(DEFAULT_SEED), []);
 
   const [showDevPage, setShowDevPage] = useState<boolean>(isDevRoute);
   const [showTechnicalDetail, setShowTechnicalDetail] = useState<boolean>(isTechnicalDefault);
+  const [judgeActive, setJudgeActive] = useState<boolean>(isJudgeDefault);
   const [started, setStarted] = useState<boolean>(isAutostart);
   const [runMode, setRunMode] = useState<'drive' | 'watch' | 'tour'>('drive');
   const [tourStep, setTourStep] = useState<number>(1);
@@ -192,8 +200,9 @@ export default function App() {
     [],
   );
 
-  // Load initial Day One brief & Gemini playback mode
+  // Load initial Day One brief & Gemini playback mode (skip when entered directly in Judge Mode)
   useEffect(() => {
+    if (judgeActive) return;
     let cancelled = false;
     setLoadingBrief(true);
     fetch('/api/day-one')
@@ -212,7 +221,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [syncUsageMeta]);
+  }, [judgeActive, syncUsageMeta]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -266,6 +275,7 @@ export default function App() {
   useEffect(() => {
     if (
       !started ||
+      judgeActive ||
       showTechnicalDetail ||
       runMode !== 'tour' ||
       requestInFlight ||
@@ -274,15 +284,41 @@ export default function App() {
       return;
     }
     const stop = getTourStop(tourStep);
-    const raf = window.requestAnimationFrame(() => {
+    const chartStops = new Set([1, 2, 4, 8]);
+    const scrollToTourRegion = () => {
+      if (chartStops.has(tourStep)) {
+        const chartEl = document.querySelector('[data-tour-chart="true"]');
+        if (chartEl instanceof HTMLElement) {
+          const rect = chartEl.getBoundingClientRect();
+          const absTop = window.scrollY + rect.top;
+          const absBottom = absTop + rect.height;
+          const overlayEl = document.querySelector('[data-testid="tour-overlay"]');
+          const overlayH =
+            overlayEl instanceof HTMLElement ? overlayEl.getBoundingClientRect().height : 170;
+          const availBottom = Math.max(240, window.innerHeight - overlayH - 16);
+          const minScrollForBottom = absBottom - availBottom;
+          const maxScrollForTop = Math.max(0, absTop - 16);
+          const idealTop = Math.max(minScrollForBottom + 16, absTop - 48);
+          const nextY =
+            minScrollForBottom > maxScrollForTop
+              ? maxScrollForTop
+              : Math.max(0, Math.min(maxScrollForTop, idealTop));
+          window.scrollTo({ top: nextY, behavior: 'smooth' });
+          return;
+        }
+      }
       const target = document.querySelector(`[data-tour-target="${stop.scrollTarget}"]`);
       if (target instanceof HTMLElement) {
         target.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
-    });
-    return () => window.cancelAnimationFrame(raf);
+    };
+    const timer = window.setTimeout(scrollToTourRegion, 60);
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [
     started,
+    judgeActive,
     showTechnicalDetail,
     runMode,
     tourStep,
@@ -1520,6 +1556,29 @@ export default function App() {
     return <DevDiagnosticsPage report={diagnostics} onBack={navigateFromDev} />;
   }
 
+  if (judgeActive) {
+    return (
+      <>
+        <JudgeMode
+          onBackToStart={() => {
+            setJudgeActive(false);
+            setStarted(false);
+          }}
+          onStartTour={() => {
+            setJudgeActive(false);
+            void handleStartTour();
+          }}
+          onInspectFact={setInspectedFact}
+        />
+        <FactPopover
+          fact={inspectedFact}
+          plainFont
+          onClose={() => setInspectedFact(null)}
+        />
+      </>
+    );
+  }
+
   if (!started) {
     if (!showTechnicalDetail) {
       return (
@@ -1528,6 +1587,7 @@ export default function App() {
             onStartTour={() => void handleStartTour()}
             onStartWatch={() => void handleStartWatch()}
             onStartDrive={() => void handleStartDrive()}
+            onStartJudge={() => setJudgeActive(true)}
             onOpenAbout={() => setShowAboutModal(true)}
             onToggleTechnicalDetail={() => setShowTechnicalDetail(true)}
           />

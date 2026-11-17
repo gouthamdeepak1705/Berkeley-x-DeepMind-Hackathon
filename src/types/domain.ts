@@ -429,6 +429,8 @@ export interface DayByDayChartPoint {
   date: string;
   sales7dWithOpscien: number;
   sales7dWithoutOpscien: number;
+  sales7dBandLow?: number;
+  sales7dBandHigh?: number;
   withoutOpscienUsd: number;
   lostSoFarUsd: number;
   savedSoFarUsd: number;

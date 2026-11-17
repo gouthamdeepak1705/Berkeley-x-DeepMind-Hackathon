@@ -92,25 +92,25 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
 
   return (
     <>
-      <aside aria-labelledby="store-board-heading" className="space-y-2.5">
-        <div>
-          <h2 id="store-board-heading" className="text-base font-semibold text-[#25372C]">
+      <aside aria-labelledby="store-board-heading" className="space-y-1.5">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 id="store-board-heading" className="text-sm font-semibold text-[#25372C]">
             All 10 stores
           </h2>
-          <p className="text-xs text-[#56695D]">
-            Tap any store for detail. Orange line marks 2.5 weeks left.
+          <p className="text-[11px] text-[#56695D]">
+            Tap any store for detail. Orange line = 2.5 wks left.
           </p>
         </div>
 
         <ul
-          className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+          className="grid grid-cols-1 sm:grid-cols-2 gap-1.5"
           data-testid="simple-store-board"
         >
           {stores.map((store) => (
             <li
               key={store.storeId}
               onClick={() => setSelectedStoreId(store.storeId)}
-              className="bg-white hover:bg-[#FFFDF7] border border-[#E5DCC7] rounded-xl p-2.5 space-y-2 transition-colors cursor-pointer shadow-2xs"
+              className="bg-white hover:bg-[#FFFDF7] border border-[#E5DCC7] rounded-xl p-2 space-y-1 transition-colors cursor-pointer shadow-2xs"
             >
               <div className="flex items-center justify-between gap-1.5">
                 <button
@@ -133,7 +133,7 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
                 </span>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <StockMiniBar
                   label="Best-sellers"
                   fact={store.bestSellersCoverFact}

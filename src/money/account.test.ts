@@ -629,7 +629,7 @@ test('Stage 7 A.3 & A.4 & Part B: Reconciles 3,822 spare units on Sep 8, Rockrid
     assert.equal(sep7Last.lostSoFarUsd, 0);
     assert.equal(sep7Last.savedSoFarUsd, 0);
 
-    // A.3: Sep 8 Best-sellers card top (3,822) matches Full analysis (3,822)
+    // Part D.7: Sep 8 Best-sellers card top (3,822) stays stricter while Full analysis shows true 6-store surplus (5,178)
     const sep8 = await evaluateStage2UpToDay({
       seed: DEFAULT_SEED,
       targetDayIndex: idx('2026-09-08'),
@@ -643,7 +643,7 @@ test('Stage 7 A.3 & A.4 & Part B: Reconciles 3,822 spare units on Sep 8, Rockrid
     assert.equal(bsCard.visualMetrics?.spareTotalUnitsFact?.value, 3822);
     assert.equal(
       bsCard.investigation?.factsById['tool:stock:donor_surplus:best_sellers:2026-09-08']?.value,
-      3822,
+      5178,
     );
     const sep8AllText =
       (bsCard.investigation?.findingSegments ?? [])
@@ -652,7 +652,15 @@ test('Stage 7 A.3 & A.4 & Part B: Reconciles 3,822 spare units on Sep 8, Rockrid
       (bsCard.investigation?.causeSegments ?? [])
         .map((s) => (s.type === 'text' ? s.text : s.fact.formatted))
         .join('');
-    assert.ok(!sep8AllText.includes('5,178'), `Expected 5,178 to be reconciled to 3,822: ${sep8AllText}`);
+    assert.ok(sep8AllText.includes('5,178'), `Expected 5,178 preserved in Full analysis: ${sep8AllText}`);
+
+    // Part D.1: Expected range band populated on Sales dayByDayPoints
+    const sep8Point = sep8.dayState.moneyAccount!.dayByDayPoints!.find((p) => p.date === '2026-09-08')!;
+    assert.ok(
+      typeof sep8Point.sales7dBandLow === 'number' &&
+        typeof sep8Point.sales7dBandHigh === 'number' &&
+        sep8Point.sales7dBandHigh > sep8Point.sales7dBandLow,
+    );
 
     // Approve Sep 8 so Santana Row becomes holdout, then check Sep 25 Knitwear donor is Rockridge (not Santana Row)
     const bsGw = executeActionThroughGateway(
@@ -697,6 +705,32 @@ test('Stage 7 A.3 & A.4 & Part B: Reconciles 3,822 spare units on Sep 8, Rockrid
       (wcCard.investigation?.options ?? []).map((o) => o.description).join(' ');
     assert.ok(!wcInvText.includes('Santana Row'), `Expected Santana Row donor to be rewritten to Rockridge: ${wcInvText}`);
     assert.ok(wcInvText.includes('Rockridge'), `Expected Rockridge donor in Knitwear details: ${wcInvText}`);
+
+    // Part D.4: Check Not now on Sep 8 -> Sep 24 re-raise shows matching $23,418 across Lost while waiting and Warnings you turned down
+    const sep24NotNow = await evaluateStage2UpToDay({
+      seed: DEFAULT_SEED,
+      targetDayIndex: idx('2026-09-24'),
+      decisions: [],
+      reactions: [
+        {
+          id: 'r:notnow:bs',
+          candidateId: 'situation:stock_running_out:best_sellers',
+          date: '2026-09-08',
+          dayIndex: idx('2026-09-08'),
+          reaction: 'not_now',
+        },
+      ],
+      investigateTargetDay: false,
+    });
+    const sep24Card = sep24NotNow.dayState.raised.find(
+      (r) => r.candidateId === 'situation:stock_running_out:best_sellers',
+    )!;
+    const sep24TurnedDown = sep24NotNow.dayState.moneyAccount!.turnedDownWarnings.find(
+      (w) => w.candidateId === 'situation:stock_running_out:best_sellers',
+    )!;
+    assert.equal(sep24Card.costOfDelayFact?.value, 23418);
+    assert.equal(sep24TurnedDown.lostSinceTurnedDownFact.value, 23418);
+    assert.equal(sep24TurnedDown.byStore.length, 3);
 
     // Part B: Check Not now on Sep 8 makes lostSoFar climb close to withoutOpscien
     const oct20NoAction = await evaluateStage2UpToDay({

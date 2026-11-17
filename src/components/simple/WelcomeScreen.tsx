@@ -1,4 +1,4 @@
-import { Eye, Play, Search, SlidersHorizontal, Sparkles, Wrench, X } from 'lucide-react';
+import { Eye, Play, Scale, Search, SlidersHorizontal, Sparkles, Wrench, X } from 'lucide-react';
 import { DayOneBrief, Fact } from '../../types/domain';
 import { FactValue } from '../FactValue';
 import { SimpleTextSegments } from './SimpleHelpers';
@@ -7,6 +7,7 @@ interface WelcomeScreenProps {
   onStartTour: () => void;
   onStartWatch: () => void;
   onStartDrive: () => void;
+  onStartJudge: () => void;
   onOpenAbout: () => void;
   onToggleTechnicalDetail: () => void;
 }
@@ -15,6 +16,7 @@ export function WelcomeScreen({
   onStartTour,
   onStartWatch,
   onStartDrive,
+  onStartJudge,
   onOpenAbout,
   onToggleTechnicalDetail,
 }: WelcomeScreenProps) {
@@ -117,6 +119,21 @@ export function WelcomeScreen({
               <SlidersHorizontal className="w-4 h-4" />
               <span>Drive it yourself</span>
             </button>
+          </div>
+
+          <div className="pt-1 border-t border-[#EFE8D6] flex flex-col sm:flex-row sm:items-center gap-2.5">
+            <button
+              type="button"
+              data-testid="judge-start-btn"
+              onClick={onStartJudge}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#FFFDF7] hover:bg-[#F5EEDD] border border-[#D8CEB8] text-[#25372C] text-sm font-semibold rounded-xl transition-colors cursor-pointer shrink-0"
+            >
+              <Scale className="w-4 h-4" />
+              <span>Test your own judgement</span>
+            </button>
+            <span className="text-xs text-[#56695D]">
+              Four real decisions. Choose by gut, then see the numbers. About 4 minutes.
+            </span>
           </div>
         </section>
 

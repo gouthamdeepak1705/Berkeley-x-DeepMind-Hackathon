@@ -100,7 +100,7 @@ export function SimpleResultPage({
         </div>
 
         {account.dayByDayPoints && account.dayByDayPoints.length > 0 && (
-          <div className="pt-4">
+          <div className="pt-4" data-tour-chart="true">
             <DayByDayChartView
               points={account.dayByDayPoints}
               events={account.dayByDayEvents ?? []}

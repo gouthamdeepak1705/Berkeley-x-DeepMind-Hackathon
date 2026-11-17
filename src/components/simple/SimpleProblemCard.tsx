@@ -205,6 +205,9 @@ export function SimpleProblemCard({
                 plainFont
                 className="font-semibold text-[#991B1B]"
               />
+              {storeNamesList.length > 0 && (
+                <span className="text-[#56695D]"> ({storeNamesList.join(', ')})</span>
+              )}
             </p>
           )}
         </div>
@@ -245,25 +248,48 @@ export function SimpleProblemCard({
                 <span>{toSimpleEnglish(item.summary)}</span>
               )
             ) : vm?.daysOfStockLeftFact && vm?.currentCoverFact ? (
-              <>
-                Sales are normal. {storeListText} will run out of {groupLabel} in{' '}
-                <FactValue fact={vm.daysOfStockLeftFact} onInspect={onInspectFact} noPlus plainFont />{' '}
-                (<FactValue fact={vm.currentCoverFact} onInspect={onInspectFact} noPlus plainFont />)
-                {vm.daysUntilDeliveryFact ? (
-                  <>
-                    , before next delivery in{' '}
-                    <FactValue
-                      fact={vm.daysUntilDeliveryFact}
-                      onInspect={onInspectFact}
-                      noPlus
-                      plainFont
-                    />
-                    .
-                  </>
-                ) : (
-                  '. No delivery is planned.'
-                )}
-              </>
+              vm.daysOfStockLeftFact.value <= 0 ? (
+                <>
+                  {storeListText} {storeNamesList.length === 1 ? 'has' : 'have'} run out of{' '}
+                  {groupLabel}. {storeNamesList.length === 1 ? 'It is' : 'They are'} losing sales
+                  every day
+                  {vm.daysUntilDeliveryFact ? (
+                    <>
+                      {' '}
+                      until next delivery in{' '}
+                      <FactValue
+                        fact={vm.daysUntilDeliveryFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                      .
+                    </>
+                  ) : (
+                    '. No delivery is planned.'
+                  )}
+                </>
+              ) : (
+                <>
+                  Sales are normal. {storeListText} will run out of {groupLabel} in{' '}
+                  <FactValue fact={vm.daysOfStockLeftFact} onInspect={onInspectFact} noPlus plainFont />{' '}
+                  (<FactValue fact={vm.currentCoverFact} onInspect={onInspectFact} noPlus plainFont />)
+                  {vm.daysUntilDeliveryFact ? (
+                    <>
+                      , before next delivery in{' '}
+                      <FactValue
+                        fact={vm.daysUntilDeliveryFact}
+                        onInspect={onInspectFact}
+                        noPlus
+                        plainFont
+                      />
+                      .
+                    </>
+                  ) : (
+                    '. No delivery is planned.'
+                  )}
+                </>
+              )
             ) : (
               <span>{toSimpleEnglish(item.summary)}</span>
             )}
@@ -645,6 +671,11 @@ export function SimpleProblemCard({
               <p className="leading-snug text-[#43564A]">
                 <RawTextSegments segments={inv.causeSegments} onInspectFact={onInspectFact} />
               </p>
+              {vm?.spareTotalUnitsFact && (
+                <p className="leading-snug text-[#56695D] pt-0.5">
+                  The card uses a stricter rule for what each store must keep, so it shows fewer spare units.
+                </p>
+              )}
             </div>
           )}
           {/* Stock threshold note if present */}
