@@ -7,6 +7,7 @@ import {
   evaluateCase3Delay,
   getJudgeScenarioBundle,
   JudgeChoiceId,
+  JudgeNumbersLine,
 } from '../../judge/judgeEngine';
 import { Fact } from '../../types/domain';
 import { FactValue } from '../FactValue';
@@ -15,6 +16,33 @@ interface JudgeModeProps {
   onBackToStart: () => void;
   onStartTour: () => void;
   onInspectFact: (fact: Fact) => void;
+}
+
+function RichLineParts({
+  line,
+  onInspectFact,
+}: {
+  line: JudgeNumbersLine;
+  onInspectFact: (fact: Fact) => void;
+}) {
+  return (
+    <>
+      {line.parts.map((part, idx) =>
+        part.fact ? (
+          <FactValue
+            key={part.fact.id + idx}
+            fact={part.fact}
+            onInspect={onInspectFact}
+            noPlus
+            plainFont
+            className="font-semibold text-[#25372C]"
+          />
+        ) : (
+          <span key={idx}>{part.text}</span>
+        ),
+      )}
+    </>
+  );
 }
 
 export function JudgeMode({
@@ -28,7 +56,7 @@ export function JudgeMode({
   const [caseIdx, setCaseIdx] = useState<number>(0);
   const [choices, setChoices] = useState<Partial<Record<1 | 2 | 3 | 4, JudgeChoiceId>>>({});
   const [case1DelayDays, setCase1DelayDays] = useState<number>(
-    bundle.cases[0].delaySliderConfig?.defaultValue ?? 14,
+    bundle.cases[0].delaySliderConfig?.defaultValue ?? 7,
   );
   const [case3DelayWeeks, setCase3DelayWeeks] = useState<number>(
     bundle.cases[2].delaySliderConfig?.defaultValue ?? 2,
@@ -79,7 +107,7 @@ export function JudgeMode({
 
   const handleTryAgain = () => {
     setChoices({});
-    setCase1DelayDays(bundle.cases[0].delaySliderConfig?.defaultValue ?? 14);
+    setCase1DelayDays(bundle.cases[0].delaySliderConfig?.defaultValue ?? 7);
     setCase3DelayWeeks(bundle.cases[2].delaySliderConfig?.defaultValue ?? 2);
     setCaseIdx(0);
     setView('case');
@@ -304,31 +332,46 @@ export function JudgeMode({
               {currentCase.dateFormatted}
             </span>
           </div>
-          <p className="text-sm text-[#43564A] leading-relaxed">{currentCase.whatYouSeeLead}</p>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-[#E5DCC7] text-[#56695D]">
-                  {currentCase.whatYouSeeColumns.map((col, i) => (
-                    <th key={col} className={`py-2 font-semibold ${i === 0 ? 'pr-3' : 'px-2 text-right'}`}>
-                      {col}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#EFE8D6] text-[#25372C]">
-                {currentCase.whatYouSeeRows.map((row, idx) => (
-                  <tr key={idx}>
-                    <td className="py-2 pr-3 font-medium">{row.store}</td>
-                    <td className="py-2 px-2 text-right tabular-nums">{row.col1}</td>
-                    <td className="py-2 px-2 text-right tabular-nums">{row.col2}</td>
-                    <td className="py-2 px-2 text-right tabular-nums">{row.col3}</td>
+          {currentCase.whatYouSeeLead && (
+            <p className="text-sm text-[#43564A] leading-relaxed">{currentCase.whatYouSeeLead}</p>
+          )}
+
+          {currentCase.whatYouSeeLines && currentCase.whatYouSeeLines.length > 0 && (
+            <div className="space-y-1.5 text-sm text-[#43564A] leading-relaxed">
+              {currentCase.whatYouSeeLines.map((line) => (
+                <p key={line.id}>
+                  <RichLineParts line={line} onInspectFact={onInspectFact} />
+                </p>
+              ))}
+            </div>
+          )}
+
+          {currentCase.whatYouSeeRows.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-[#E5DCC7] text-[#56695D]">
+                    {currentCase.whatYouSeeColumns.map((col, i) => (
+                      <th key={col} className={`py-2 font-semibold ${i === 0 ? 'pr-3' : 'px-2 text-right'}`}>
+                        {col}
+                      </th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-[#EFE8D6] text-[#25372C]">
+                  {currentCase.whatYouSeeRows.map((row, idx) => (
+                    <tr key={idx}>
+                      <td className="py-2 pr-3 font-medium">{row.store}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">{row.col1}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">{row.col2}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">{row.col3}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
         {/* Step 2: What would you do? */}
@@ -361,6 +404,11 @@ export function JudgeMode({
               );
             })}
           </div>
+          {currentCase.optionsFootnote && (
+            <p className="text-xs text-[#56695D] leading-relaxed pt-0.5">
+              {currentCase.optionsFootnote}
+            </p>
+          )}
         </section>
 
         {/* Steps 3-6 revealed once an option is selected */}
@@ -380,7 +428,7 @@ export function JudgeMode({
                   return (
                     <div
                       key={opt.id}
-                      className={`p-3 rounded-xl border text-xs space-y-1 ${
+                      className={`p-3 rounded-xl border text-xs space-y-1.5 ${
                         isChosen
                           ? 'bg-[#F4F8F5] border-2 border-[#25372C]'
                           : 'bg-[#FFFDF7] border-[#E5DCC7]'
@@ -393,7 +441,7 @@ export function JudgeMode({
                         </span>
                         {opt.lossFact ? (
                           <span className="font-semibold text-[#991B1B] tabular-nums">
-                            Lost:{' '}
+                            {opt.costLabel ?? 'Lost'}:{' '}
                             <FactValue
                               fact={opt.lossFact}
                               onInspect={onInspectFact}
@@ -412,6 +460,13 @@ export function JudgeMode({
                         )}
                       </div>
                       <p className="text-[#43564A] leading-snug">{opt.resultSummary}</p>
+                      {opt.emptyStoreLines && opt.emptyStoreLines.length > 0 && (
+                        <ul className="space-y-0.5 text-[#43564A] pl-4 list-disc">
+                          {opt.emptyStoreLines.map((line) => (
+                            <li key={line}>{line}</li>
+                          ))}
+                        </ul>
+                      )}
                       {opt.resultFacts.length > 0 && (
                         <div className="flex flex-wrap gap-3 pt-0.5 text-[#56695D]">
                           {opt.resultFacts.map((rf) => (
@@ -442,20 +497,37 @@ export function JudgeMode({
               <h2 className="text-sm font-semibold text-[#25372C]">4. What the numbers say</h2>
               <ul className="space-y-2 text-sm text-[#43564A] leading-relaxed">
                 {currentCase.numbersLines.map((line) => (
-                  <li key={line.id} className="p-3 rounded-xl bg-[#FFFDF7] border border-[#E5DCC7]">
-                    {line.parts.map((part, idx) =>
-                      part.fact ? (
-                        <FactValue
-                          key={part.fact.id + idx}
-                          fact={part.fact}
-                          onInspect={onInspectFact}
-                          noPlus
-                          plainFont
-                          className="font-semibold text-[#25372C]"
-                        />
-                      ) : (
-                        <span key={idx}>{part.text}</span>
-                      ),
+                  <li key={line.id} className="p-3 rounded-xl bg-[#FFFDF7] border border-[#E5DCC7] space-y-2.5">
+                    <div>
+                      <RichLineParts line={line} onInspectFact={onInspectFact} />
+                    </div>
+                    {line.table && line.table.rows.length > 0 && (
+                      <div className="overflow-x-auto pt-1">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="border-b border-[#E5DCC7] text-[#56695D]">
+                              {line.table.columns.map((col, i) => (
+                                <th
+                                  key={col}
+                                  className={`py-1.5 font-semibold ${i === 0 ? 'pr-3' : 'px-2 text-right'}`}
+                                >
+                                  {col}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[#EFE8D6] text-[#25372C]">
+                            {line.table.rows.map((row, rIdx) => (
+                              <tr key={rIdx}>
+                                <td className="py-1.5 pr-3 font-medium">{row.store}</td>
+                                <td className="py-1.5 px-2 text-right tabular-nums">{row.col1}</td>
+                                <td className="py-1.5 px-2 text-right tabular-nums">{row.col2}</td>
+                                <td className="py-1.5 px-2 text-right tabular-nums">{row.col3}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     )}
                   </li>
                 ))}
@@ -469,7 +541,17 @@ export function JudgeMode({
               </h2>
               {currentCase.hasDelaySlider && currentCase.delaySliderConfig && activeDelayEval ? (
                 <div className="space-y-3">
-                  <p className="text-xs text-[#43564A] leading-snug">
+                  {currentCase.delaySliderConfig.aboveSliderLines &&
+                    currentCase.delaySliderConfig.aboveSliderLines.length > 0 && (
+                      <div className="space-y-1.5 text-sm text-[#43564A] leading-relaxed">
+                        {currentCase.delaySliderConfig.aboveSliderLines.map((line) => (
+                          <p key={line.id}>
+                            <RichLineParts line={line} onInspectFact={onInspectFact} />
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  <p className="text-xs text-[#56695D] leading-snug">
                     {currentCase.delaySliderConfig.helperText}
                   </p>
                   <div className="p-3.5 rounded-xl bg-[#FFFDF7] border border-[#E5DCC7] space-y-2.5">
@@ -519,6 +601,16 @@ export function JudgeMode({
                       <span className="text-xs text-[#56695D]">{activeDelayEval.detailText}</span>
                     </div>
                   </div>
+                  {currentCase.delaySliderConfig.belowSliderLines &&
+                    currentCase.delaySliderConfig.belowSliderLines.length > 0 && (
+                      <div className="space-y-1 text-xs text-[#43564A] leading-relaxed">
+                        {currentCase.delaySliderConfig.belowSliderLines.map((line) => (
+                          <p key={line.id}>
+                            <RichLineParts line={line} onInspectFact={onInspectFact} />
+                          </p>
+                        ))}
+                      </div>
+                    )}
                 </div>
               ) : (
                 <p className="text-sm text-[#43564A] leading-relaxed">

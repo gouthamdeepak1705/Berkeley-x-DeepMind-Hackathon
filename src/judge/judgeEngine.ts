@@ -16,10 +16,12 @@ export interface JudgeOption {
   id: JudgeChoiceId;
   label: string;
   detail: string;
+  costLabel?: string;
   lossUsd: number;
   lossFact?: Fact;
   isCorrect?: boolean;
   resultSummary: string;
+  emptyStoreLines?: string[];
   resultFacts: Fact[];
 }
 
@@ -31,9 +33,15 @@ export interface JudgeTableRow {
   col4?: string;
 }
 
+export interface JudgeNumbersTable {
+  columns: string[];
+  rows: JudgeTableRow[];
+}
+
 export interface JudgeNumbersLine {
   id: string;
   parts: Array<{ text?: string; fact?: Fact }>;
+  table?: JudgeNumbersTable;
 }
 
 export interface JudgeCaseSpec {
@@ -41,11 +49,13 @@ export interface JudgeCaseSpec {
   date: string;
   dateFormatted: string;
   title: string;
-  whatYouSeeLead: string;
+  whatYouSeeLead?: string;
+  whatYouSeeLines?: JudgeNumbersLine[];
   whatYouSeeColumns: string[];
   whatYouSeeRows: JudgeTableRow[];
   promptQuestion: string;
   options: [JudgeOption, JudgeOption, JudgeOption];
+  optionsFootnote?: string;
   numbersLines: JudgeNumbersLine[];
   hasDelaySlider: boolean;
   delaySliderConfig?: {
@@ -57,6 +67,8 @@ export interface JudgeCaseSpec {
     unitPlural: string;
     label: string;
     helperText: string;
+    aboveSliderLines?: JudgeNumbersLine[];
+    belowSliderLines?: JudgeNumbersLine[];
   };
   noSliderExplanation?: string;
   opscienSummary: string;
@@ -83,6 +95,84 @@ export interface JudgeScenarioBundle {
 const bundleCache = new Map<number, JudgeScenarioBundle>();
 const case1DelayCache = new Map<string, JudgeDelayEvaluation>();
 const case3DelayCache = new Map<string, JudgeDelayEvaluation>();
+
+import { getIsoWeekKey } from '../engine/calendar';
+
+const FULL_MONTHS = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+function formatLongDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  void y;
+  return `${d} ${FULL_MONTHS[(m ?? 1) - 1] ?? ''}`;
+}
+
+function format12HourTime(hhmm: string): string {
+  const [hhRaw, mmRaw] = hhmm.split(':').map(Number);
+  const hh = hhRaw ?? 0;
+  const mm = String(mmRaw ?? 0).padStart(2, '0');
+  const suffix = hh >= 12 ? 'pm' : 'am';
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return `${h12}:${mm} ${suffix}`;
+}
+
+function makeCustomCountFact(
+  id: string,
+  label: string,
+  value: number,
+  formatted: string,
+  note: string,
+): Fact {
+  return {
+    id,
+    label,
+    value,
+    formatted,
+    unit: 'count',
+    note,
+  };
+}
+
+function summarizeEmptyStores(
+  sim: SimulationRun,
+  storeIds: StoreId[],
+  upToDate: string = LIVE_END_DATE,
+): { lines: string[]; firstEmptyDate: string | null } {
+  const lines: string[] = [];
+  let earliest: string | null = null;
+  for (const sid of storeIds) {
+    const emptyDates: string[] = [];
+    for (const d of sim.liveDates) {
+      if (d > upToDate) break;
+      const r = sim.storeRecordsByDate[d]?.[sid];
+      if (!r?.isOpen) continue;
+      const g = r.groups.best_sellers;
+      if (g.potentialSales - g.actualSales > 0.01) {
+        emptyDates.push(d);
+      }
+    }
+    if (emptyDates.length > 0) {
+      const firstDate = emptyDates[0];
+      if (!earliest || firstDate < earliest) earliest = firstDate;
+      lines.push(
+        `${STORE_MAP[sid].name}: empty from ${formatLongDate(firstDate)}, ${emptyDates.length} ${emptyDates.length === 1 ? 'day' : 'days'}`,
+      );
+    }
+  }
+  return { lines, firstEmptyDate: earliest };
+}
 
 function sumBestSellersLossForStores(
   sim: SimulationRun,
@@ -293,7 +383,7 @@ function computeQuietAndSignalCountsForOpscienRun(seed: number, sim0: Simulation
   const simFull = runSimulation(seed, fullDecs, LIVE_END_DATE);
 
   let signalsChecked = 0;
-  let stayedQuiet = 0;
+  const letGoWeeks = new Set<string>();
   for (const d of simFull.liveDates) {
     const activeDecs = fullDecs.filter((dec) => dec.date <= d);
     const controlStores = new Set<string>();
@@ -302,14 +392,15 @@ function computeQuietAndSignalCountsForOpscienRun(seed: number, sim0: Simulation
     }
     const rawCands = runDetectorsForDay(simFull, d);
     signalsChecked += rawCands.length;
+    const weekKey = getIsoWeekKey(d);
     for (const raw of rawCands) {
       const checked = applySilenceChecks(raw, simFull, d, activeDecs, controlStores);
       if (checked.explainedBy) {
-        stayedQuiet += 1;
+        letGoWeeks.add(`${raw.id}:${checked.explainedBy.check}:${weekKey}`);
       }
     }
   }
-  return { signalsChecked, stayedQuiet };
+  return { signalsChecked, stayedQuiet: letGoWeeks.size };
 }
 
 export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenarioBundle {
@@ -319,15 +410,8 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
   const sim0 = runSimulation(seed, [], LIVE_END_DATE);
   const shortStores: StoreId[] = ['union_square', 'palo_alto', 'santana_row'];
 
-  // ---------- CASE 1: 2026-09-08 Best-sellers shortage ----------
   const sep8Date = '2026-09-08';
   const sep8Recs = sim0.storeRecordsByDate[sep8Date];
-  const sep8StockTool = executeCheckerTool(
-    'get_stock_cover_by_store_and_group',
-    { group_id: 'best_sellers' },
-    sim0,
-    sep8Date,
-  );
   const strictPlan = buildTransferPlanForGroup({
     sim: sim0,
     date: sep8Date,
@@ -347,61 +431,69 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
     },
   );
 
-  // Strict spare (8 weeks + delivery floor formula matching card top 3,822)
   const nextDelBs = sim0.scheduledDeliveries
     .filter((d) => d.groupId === 'best_sellers' && d.date > sep8Date)
     .sort((a, b) => a.date.localeCompare(b.date))[0];
   const daysToDel = diffDays(sep8Date, nextDelBs.date);
-  const strictFloor = Math.max(8, daysToDel / 7 + 1);
-  let strictSpareTotal = 0;
-  for (const st of STORES) {
-    if (shortStores.includes(st.id)) continue;
-    const gs = sep8Recs[st.id].groups.best_sellers;
-    const cov = gs.weeksOfCover ?? 0;
-    const baseW = (st.baseDailySales * 7 * 0.35 * 1.06) / 120;
-    const avgW = cov > 0.01 ? gs.endingStock / cov : baseW;
-    const sp = Math.floor(gs.endingStock - strictFloor * Math.max(avgW, baseW));
-    if (sp >= 10) strictSpareTotal += sp;
-  }
 
-  const rawToolSpareFact = sep8StockTool.facts.find((f) => f.id.startsWith('tool:stock:donor_surplus:best_sellers:'))!;
-  const toolSpareFact = createFact(
-    'judge:c1:spare_pool',
-    'Best-sellers spare units at giving stores',
-    rawToolSpareFact.value,
-    'units',
-    'Total Best-sellers units available across 6 giving stores (Walnut Creek, Pasadena, Sacramento, Santa Barbara, Rockridge, Burlingame) after keeping each store’s 8-week and delivery-buffer floor.',
-  );
+  // Case 1 Step 1 rates
+  const estThisWeekSales = sim0.dates
+    .filter((d) => d >= '2026-09-02' && d <= '2026-09-08')
+    .reduce((s, d) => s + sim0.chainRecordsByDate[d].establishedActualSales, 0);
+  const estPrior4WeekAvg =
+    sim0.dates
+      .filter((d) => d >= '2026-08-05' && d <= '2026-09-01')
+      .reduce((s, d) => s + sim0.chainRecordsByDate[d].establishedActualSales, 0) / 4;
+  const estWeekVsLast4Pct = Math.trunc(((estThisWeekSales / estPrior4WeekAvg) - 1) * 100);
+  const allStoresLyPctSep8 = Math.round(sim0.chainRecordsByDate[sep8Date].allStores28dVsLastYearPct);
 
-  // Option A: Do nothing
+  // Option A: Leave it
   const c1OptA = sumBestSellersLossForStores(sim0, shortStores, LIVE_END_DATE);
+  const c1OptAEmpty = summarizeEmptyStores(sim0, shortStores, LIVE_END_DATE);
 
-  // Option B: Flat 1,500 units (500 units × 3 stores, allocated evenly across the 3 short stores: 700 / 500 / 300)
-  const flatPool = 500 * shortStores.length;
-  const weightSumB = shortStores.reduce(
-    (s, sid) => s + sep8Recs[sid].groups.best_sellers.potentialSales,
-    0,
-  );
-  const allocB: Array<{ storeId: StoreId; units: number }> = shortStores.map((sid, idx) => {
-    if (idx < shortStores.length - 1) {
-      return {
-        storeId: sid,
-        units: Math.round((sep8Recs[sid].groups.best_sellers.potentialSales / weightSumB) * flatPool / 100) * 100,
-      };
-    }
-    return { storeId: sid, units: 0 };
-  });
-  allocB[allocB.length - 1].units = flatPool - allocB.slice(0, -1).reduce((s, a) => s + a.units, 0);
-  const dec1B = buildManualBestSellersDecision({
+  // Option B: Send 500 units to each of the three stores (Sacramento->Union Square, Santa Barbara->Palo Alto, Rockridge->Santana Row)
+  const flatPerStore = 500;
+  const flatPool = flatPerStore * shortStores.length;
+  const dec1B: ActionDecision = {
     id: 'judge:c1:b',
+    candidateId: 'situation:stock_running_out:best_sellers',
     date: sep8Date,
-    donors: donorStocks,
-    allocations: allocB,
-  });
+    kind: 'transfer',
+    groupId: 'best_sellers',
+    transferLines: [
+      {
+        fromStoreId: 'sacramento',
+        fromStoreName: STORE_MAP.sacramento.name,
+        toStoreId: 'union_square',
+        toStoreName: STORE_MAP.union_square.name,
+        groupId: 'best_sellers',
+        units: flatPerStore,
+      },
+      {
+        fromStoreId: 'santa_barbara',
+        fromStoreName: STORE_MAP.santa_barbara.name,
+        toStoreId: 'palo_alto',
+        toStoreName: STORE_MAP.palo_alto.name,
+        groupId: 'best_sellers',
+        units: flatPerStore,
+      },
+      {
+        fromStoreId: 'rockridge',
+        fromStoreName: STORE_MAP.rockridge.name,
+        toStoreId: 'santana_row',
+        toStoreName: STORE_MAP.santana_row.name,
+        groupId: 'best_sellers',
+        units: flatPerStore,
+      },
+    ],
+    totalUnits: flatPool,
+    arrivalDate: addDays(sep8Date, 2),
+  };
   const sim1B = runSimulation(seed, [dec1B], LIVE_END_DATE);
   const c1OptB = sumBestSellersLossForStores(sim1B, shortStores, LIVE_END_DATE);
+  const c1OptBEmpty = summarizeEmptyStores(sim1B, shortStores, LIVE_END_DATE);
 
-  // Option C: 9 weeks of trailing 28-day demand (2,191 units = 945 + 685 + 561)
+  // Option C: Do the sum from the report (9 weeks of trailing 28-day demand = 2,191 units)
   const allocC: Array<{ storeId: StoreId; units: number }> = shortStores.map((sid) => {
     const gs = sep8Recs[sid].groups.best_sellers;
     const avgW = gs.endingStock / (gs.weeksOfCover ?? 1);
@@ -416,6 +508,7 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
   });
   const sim1C = runSimulation(seed, [dec1C], LIVE_END_DATE);
   const c1OptC = sumBestSellersLossForStores(sim1C, shortStores, LIVE_END_DATE);
+  const c1OptCEmpty = summarizeEmptyStores(sim1C, shortStores, LIVE_END_DATE);
 
   // Opscien actual Case 1 path (Sep 8 holdout transfer + Sep 27 rollout)
   const opscienPlanSep8 = buildTransferPlanForGroup({
@@ -456,75 +549,125 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
   const simOpsC1 = runSimulation(seed, [decOpsSep8, decOpsRollout], LIVE_END_DATE);
   const opsC1Loss = sumBestSellersLossForStores(simOpsC1, shortStores, LIVE_END_DATE);
 
-  // Case 1 pacing facts
+  // Case 1 "What the numbers say" computed metrics
   const unionRec = sep8Recs.union_square.groups.best_sellers;
   const paloRec = sep8Recs.palo_alto.groups.best_sellers;
   const santRec = sep8Recs.santana_row.groups.best_sellers;
-  const unionEarlyAugWk =
+  const wcRec = sep8Recs.walnut_creek.groups.best_sellers;
+
+  const unionReportWeeklyPace = Math.round(unionRec.endingStock / (unionRec.weeksOfCover ?? 1));
+  const unionAfterSep8WeeklyDemand = Math.round(
     sim0.dates
-      .filter((d) => d >= '2026-08-01' && d <= '2026-08-24')
-      .reduce((s, d) => s + sim0.storeRecordsByDate[d].union_square.groups.best_sellers.unitsSold, 0) /
-    (24 / 7);
-  const unionLast7Units = sim0.dates
-    .filter((d) => d >= '2026-09-02' && d <= '2026-09-08')
-    .reduce((s, d) => s + sim0.storeRecordsByDate[d].union_square.groups.best_sellers.unitsSold, 0);
-  const unionPaceJumpPct = ((unionLast7Units / unionEarlyAugWk) - 1) * 100;
+      .filter((d) => d >= '2026-09-09' && d <= '2026-10-06')
+      .reduce((s, d) => s + sim0.storeRecordsByDate[d].union_square.groups.best_sellers.unitsDemanded, 0) /
+      4,
+  );
+  const unionFirstEmpty = c1OptAEmpty.firstEmptyDate ?? '2026-09-21';
+  const daysToFirstEmpty = diffDays(sep8Date, unionFirstEmpty);
+
+  const demandSep9ToNov8 = (sid: StoreId) =>
+    sim0.dates
+      .filter((d) => d >= '2026-09-09' && d < nextDelBs.date)
+      .reduce((s, d) => s + sim0.storeRecordsByDate[d][sid].groups.best_sellers.unitsDemanded, 0);
+
+  const unionDemand61 = Math.round(demandSep9ToNov8('union_square'));
+  const unionStockSep8 = Math.round(unionRec.endingStock);
+  const paloShort61 = Math.round(demandSep9ToNov8('palo_alto') - paloRec.endingStock);
+  const santShort61 = Math.round(demandSep9ToNov8('santana_row') - santRec.endingStock);
+  const wcDemand61 = Math.round(demandSep9ToNov8('walnut_creek'));
+  const wcStockSep8 = Math.round(wcRec.endingStock);
+  const wcWeeksSep8 = wcRec.weeksOfCover ?? 0;
+
+  const strictToUnion = strictPlan.transferLines
+    .filter((l) => l.toStoreId === 'union_square')
+    .reduce((s, l) => s + l.units, 0);
+  const strictToPalo = strictPlan.transferLines
+    .filter((l) => l.toStoreId === 'palo_alto')
+    .reduce((s, l) => s + l.units, 0);
+  const strictToSantana = strictPlan.transferLines
+    .filter((l) => l.toStoreId === 'santana_row')
+    .reduce((s, l) => s + l.units, 0);
+
+  const sep21LyPct = Math.round(sim0.chainRecordsByDate[unionFirstEmpty].allStores28dVsLastYearPct);
+  const sliderDay0Eval = evaluateCase1Delay(seed, 0);
+  const sliderDay28Eval = evaluateCase1Delay(seed, 28);
+  const extraDayAvgUsd = Math.round((sliderDay28Eval.lossUsd - sliderDay0Eval.lossUsd) / 28 / 100) * 100;
+
+  const case1StoreOrder: StoreId[] = [
+    'union_square',
+    'palo_alto',
+    'santana_row',
+    'walnut_creek',
+    'burlingame',
+    'pasadena',
+    'napa',
+    'sacramento',
+    'santa_barbara',
+    'rockridge',
+  ];
 
   const case1Spec: JudgeCaseSpec = {
     caseNumber: 1,
     date: sep8Date,
-    dateFormatted: formatShortDate(sep8Date),
-    title: 'Best-sellers running low at three stores',
-    whatYouSeeLead: `Three busy stores are under three weeks of Best-sellers stock, and the next factory delivery is ${daysToDel} days away on ${formatShortDate(nextDelBs.date)}. Other stores hold full shelves.`,
-    whatYouSeeColumns: ['Store', 'Stock on hand', 'Weekly pace', 'Stock left'],
-    whatYouSeeRows: [
+    dateFormatted: formatLongDate(sep8Date),
+    title: 'The shelf that looked full',
+    whatYouSeeLines: [
       {
-        store: 'Union Square',
-        col1: `${Math.round(unionRec.endingStock).toLocaleString('en-US')} units`,
-        col2: `${Math.round(unionRec.endingStock / (unionRec.weeksOfCover ?? 1)).toLocaleString('en-US')} units/wk`,
-        col3: `${(unionRec.weeksOfCover ?? 0).toFixed(1)} wks`,
+        id: 'c1-see-1',
+        parts: [
+          { text: 'Summer is over. Sales at the eight older stores this week are up ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:see:est_lift',
+              'Eight older stores weekly rise',
+              estWeekVsLast4Pct,
+              String(estWeekVsLast4Pct),
+              'Sales across the 8 established stores over 2 Sep – 8 Sep vs their prior 4-week average (5 Aug – 1 Sep).',
+            ),
+          },
+          { text: '% on the last four weeks.' },
+        ],
       },
       {
-        store: 'Palo Alto',
-        col1: `${Math.round(paloRec.endingStock).toLocaleString('en-US')} units`,
-        col2: `${Math.round(paloRec.endingStock / (paloRec.weeksOfCover ?? 1)).toLocaleString('en-US')} units/wk`,
-        col3: `${(paloRec.weeksOfCover ?? 0).toFixed(1)} wks`,
+        id: 'c1-see-2',
+        parts: [
+          { text: 'All stores against last year: up ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:see:all_ly',
+              'All stores vs last year',
+              allStoresLyPctSep8,
+              String(allStoresLyPctSep8),
+              'All-store sales over the 28 days ending 8 September vs matching days last year.',
+            ),
+          },
+          { text: '%.' },
+        ],
       },
       {
-        store: 'Santana Row',
-        col1: `${Math.round(santRec.endingStock).toLocaleString('en-US')} units`,
-        col2: `${Math.round(santRec.endingStock / (santRec.weeksOfCover ?? 1)).toLocaleString('en-US')} units/wk`,
-        col3: `${(santRec.weeksOfCover ?? 0).toFixed(1)} wks`,
-      },
-      {
-        store: 'Sacramento, Santa Barbara, Rockridge (combined)',
-        col1: `${(['sacramento', 'santa_barbara', 'rockridge'] as StoreId[])
-          .reduce((s, sid) => s + Math.round(sep8Recs[sid].groups.best_sellers.endingStock), 0)
-          .toLocaleString('en-US')} units`,
-        col2: `${(['sacramento', 'santa_barbara', 'rockridge'] as StoreId[])
-          .reduce(
-            (s, sid) =>
-              s +
-              Math.round(
-                sep8Recs[sid].groups.best_sellers.endingStock /
-                  (sep8Recs[sid].groups.best_sellers.weeksOfCover ?? 1),
-              ),
-            0,
-          )
-          .toLocaleString('en-US')} units/wk`,
-        col3: `${Math.min(
-          sep8Recs.sacramento.groups.best_sellers.weeksOfCover ?? 0,
-          sep8Recs.santa_barbara.groups.best_sellers.weeksOfCover ?? 0,
-          sep8Recs.rockridge.groups.best_sellers.weeksOfCover ?? 0,
-        ).toFixed(1)}+ wks`,
+        id: 'c1-see-3',
+        parts: [
+          { text: 'The supplier of Best-sellers has paused deliveries. The next delivery is 9 November.' },
+        ],
       },
     ],
+    whatYouSeeColumns: ['Store', 'Stock on hand', 'Weekly pace', 'Stock left'],
+    whatYouSeeRows: case1StoreOrder.map((sid) => {
+      const rec = sep8Recs[sid].groups.best_sellers;
+      const pace = rec.weeksOfCover ? Math.round(rec.endingStock / rec.weeksOfCover) : 0;
+      return {
+        store: STORE_MAP[sid].name,
+        col1: `${Math.round(rec.endingStock).toLocaleString('en-US')} units`,
+        col2: `${pace.toLocaleString('en-US')} units/wk`,
+        col3: `${(rec.weeksOfCover ?? 0).toFixed(1)} wks`,
+      };
+    }),
     promptQuestion: 'What would you do this morning?',
     options: [
       {
         id: 'a',
-        label: `Wait for the ${formatShortDate(nextDelBs.date)} delivery`,
-        detail: 'Leave stock where it sits and let the next planned delivery fill the shelves.',
+        label: 'Leave it.',
+        detail: 'Sales are strong and every store has stock.',
         lossUsd: c1OptA.lossUsd,
         lossFact: createFact(
           'judge:c1:opt_a:loss',
@@ -533,7 +676,8 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
           'USD',
           'Simulated Best-sellers sales lost across Union Square, Palo Alto, and Santana Row through 14 Nov with no transfer.',
         ),
-        resultSummary: `All three stores run dry for ${c1OptA.emptyDays} days until the ${formatShortDate(nextDelBs.date)} delivery arrives.`,
+        resultSummary: `All three stores run out before the ${formatLongDate(nextDelBs.date)} delivery arrives.`,
+        emptyStoreLines: c1OptAEmpty.lines,
         resultFacts: [
           createFact(
             'judge:c1:opt_a:empty_days',
@@ -546,40 +690,42 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
       },
       {
         id: 'b',
-        label: `Move ${flatPool.toLocaleString('en-US')} units now`,
-        detail: `Send a quick round transfer (${allocB.map((a) => `${a.units} to ${STORE_MAP[a.storeId].name}`).join(', ')}) from well-stocked stores.`,
+        label: `Send ${flatPerStore} units to each of the three stores.`,
+        detail: `${flatPerStore} is more than double what they hold. That is plenty.`,
         lossUsd: c1OptB.lossUsd,
         lossFact: createFact(
           'judge:c1:opt_b:loss',
           'Case 1 Option B lost sales',
           c1OptB.lossUsd,
           'USD',
-          `Simulated Best-sellers sales lost after transferring ${flatPool.toLocaleString('en-US')} units on 8 Sep.`,
+          `Simulated Best-sellers sales lost after transferring ${flatPerStore} units to each of the three stores on 8 Sep (Sacramento to Union Square, Santa Barbara to Palo Alto, Rockridge to Santana Row).`,
         ),
-        resultSummary: `It buys time, then runs short again before ${formatShortDate(nextDelBs.date)} because the gap is larger than ${flatPool.toLocaleString('en-US')} units.`,
+        resultSummary: `Each store holds out longer, then empties before ${formatLongDate(nextDelBs.date)}.`,
+        emptyStoreLines: c1OptBEmpty.lines,
         resultFacts: [
           createFact(
             'judge:c1:opt_b:empty_days',
             'Days still short',
             c1OptB.emptyDays,
             'days',
-            'Days later in the season with empty shelves after the 1,500-unit transfer ran out.',
+            'Days later in the season with at least one of the three stores holding zero Best-sellers stock.',
           ),
         ],
       },
       {
         id: 'c',
-        label: `Cover 9 weeks at recent sales pace (${unitsC.toLocaleString('en-US')} units)`,
-        detail: `Move ${allocC.map((a) => `${a.units} to ${STORE_MAP[a.storeId].name}`).join(', ')} based on the last four weeks of sales.`,
+        label: `Do the sum from the report (${unitsC.toLocaleString('en-US')} units).`,
+        detail: 'Nine weeks until the delivery, times weekly sales, minus what they hold.',
         lossUsd: c1OptC.lossUsd,
         lossFact: createFact(
           'judge:c1:opt_c:loss',
           'Case 1 Option C lost sales',
           c1OptC.lossUsd,
           'USD',
-          `Simulated Best-sellers sales lost after transferring ${unitsC.toLocaleString('en-US')} units based on 9 weeks of trailing 28-day demand.`,
+          `Simulated Best-sellers sales lost after transferring ${unitsC.toLocaleString('en-US')} units based on 9 weeks of August report pace.`,
         ),
-        resultSummary: `Leaves out the ${daysToDel}-day wait until ${formatShortDate(nextDelBs.date)} plus buffer, so shelves still empty out late in the gap (${c1OptC.emptyDays} days short).`,
+        resultSummary: 'You did the arithmetic and still lost money, because the report gave a summer selling rate.',
+        emptyStoreLines: c1OptCEmpty.lines,
         resultFacts: [
           createFact(
             'judge:c1:opt_c:opt_needed',
@@ -596,59 +742,182 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
         id: 'c1-num-1',
         parts: [
           {
-            text: `Union Square holds ${Math.round(unionRec.endingStock)} units (` +
-              `${(unionRec.weeksOfCover ?? 0).toFixed(1)} wks) and sales pace in the last week rose `,
+            text: "The 'weekly pace' column was measured in August, the slowest month. After summer, Union Square sells ",
           },
           {
-            fact: createFact(
-              'judge:c1:pace_jump',
-              'Union Square sales pace rise',
-              unionPaceJumpPct,
-              'percent',
-              'Union Square Best-sellers units sold in the 7 days ending 8 Sep vs early-August weekly average.',
+            fact: makeCustomCountFact(
+              'judge:c1:us_autumn_wk',
+              'Union Square post-summer weekly pace',
+              unionAfterSep8WeeklyDemand,
+              unionAfterSep8WeeklyDemand.toLocaleString('en-US'),
+              'Average Best-sellers units customers asked for per week at Union Square over the 28 days after 8 September.',
             ),
           },
-          { text: ' above early August.' },
+          { text: ' a week, not ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:us_aug_wk',
+              'Union Square August weekly pace',
+              unionReportWeeklyPace,
+              unionReportWeeklyPace.toLocaleString('en-US'),
+              'Union Square Best-sellers weekly sales pace shown on the 8 September report from trailing 28-day August sales.',
+            ),
+          },
+          { text: '.' },
         ],
       },
       {
         id: 'c1-num-2',
         parts: [
+          { text: 'Union Square has ' },
           {
-            text: `The next Best-sellers delivery is `,
+            fact: makeCustomCountFact(
+              'judge:c1:us_days_left',
+              'Days until Union Square empties',
+              daysToFirstEmpty,
+              String(daysToFirstEmpty),
+              'Days from 8 September until Union Square Best-sellers shelves run dry on 21 September.',
+            ),
           },
+          { text: ' days of stock. The delivery is ' },
           {
-            fact: createFact(
+            fact: makeCustomCountFact(
               'judge:c1:del_days',
               'Days until next delivery',
               daysToDel,
-              'days',
-              'Days from 8 Sep until the 9 Nov scheduled Best-sellers delivery.',
+              String(daysToDel),
+              'Days from 8 September until the 9 November Best-sellers delivery.',
             ),
           },
-          {
-            text: ` away (${formatShortDate(nextDelBs.date)}). Without help, shelves empty out on 21 Sep for ${c1OptA.emptyDays} days.`,
-          },
+          { text: ' days away.' },
         ],
       },
       {
         id: 'c1-num-3',
         parts: [
-          { text: 'Giving stores (Sacramento, Santa Barbara, Rockridge, and three more) hold ' },
-          { fact: toolSpareFact },
+          { text: 'Before 9 November customers will ask Union Square for ' },
           {
-            text: ` above their own safety limit (${strictSpareTotal.toLocaleString('en-US')} under the stricter card limit). Reaching ${formatShortDate(nextDelBs.date)} at zero loss requires `,
+            fact: makeCustomCountFact(
+              'judge:c1:us_dem61',
+              'Union Square Best-sellers demand until 9 Nov',
+              unionDemand61,
+              unionDemand61.toLocaleString('en-US'),
+              'Simulated Best-sellers units customers want at Union Square from 9 September through 8 November.',
+            ),
           },
+          { text: ' units. It has ' },
           {
-            fact: createFact(
+            fact: makeCustomCountFact(
+              'judge:c1:us_stock',
+              'Union Square Best-sellers stock on 8 Sep',
+              unionStockSep8,
+              unionStockSep8.toLocaleString('en-US'),
+              'Ending Best-sellers stock at Union Square on 8 September.',
+            ),
+          },
+          { text: '. Palo Alto is short by ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:pa_short',
+              'Palo Alto Best-sellers gap until 9 Nov',
+              paloShort61,
+              paloShort61.toLocaleString('en-US'),
+              'Simulated Best-sellers demand at Palo Alto from 9 Sep to 8 Nov minus ending stock on 8 Sep.',
+            ),
+          },
+          { text: ', Santana Row by ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:sr_short',
+              'Santana Row Best-sellers gap until 9 Nov',
+              santShort61,
+              santShort61.toLocaleString('en-US'),
+              'Simulated Best-sellers demand at Santana Row from 9 Sep to 8 Nov minus ending stock on 8 Sep.',
+            ),
+          },
+          { text: '.' },
+        ],
+      },
+      {
+        id: 'c1-num-4',
+        parts: [
+          { text: 'Walnut Creek shows ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:wc_wks',
+              'Walnut Creek cover on 8 Sep',
+              wcWeeksSep8,
+              wcWeeksSep8.toFixed(1),
+              'Walnut Creek weeks of Best-sellers cover on 8 September.',
+            ),
+          },
+          { text: ' weeks, but it will sell ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:wc_dem61',
+              'Walnut Creek demand before 9 Nov',
+              wcDemand61,
+              wcDemand61.toLocaleString('en-US'),
+              'Simulated Best-sellers units Walnut Creek itself needs from 9 Sep to 8 Nov.',
+            ),
+          },
+          { text: ' of its ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:wc_stock',
+              'Walnut Creek stock on 8 Sep',
+              wcStockSep8,
+              wcStockSep8.toLocaleString('en-US'),
+              'Ending Best-sellers stock at Walnut Creek on 8 September.',
+            ),
+          },
+          { text: ' units itself. Only Sacramento, Santa Barbara and Rockridge have real spare stock.' },
+        ],
+      },
+      {
+        id: 'c1-num-5',
+        parts: [
+          { text: 'The right move is ' },
+          {
+            fact: makeCustomCountFact(
               'judge:c1:zero_loss_units',
               'Units needed for zero loss',
               strictPlan.totalUnitsFact.value,
-              'units',
+              strictPlan.totalUnitsFact.value.toLocaleString('en-US'),
               'Total Best-sellers units needed across Union Square, Palo Alto, and Santana Row on 8 Sep.',
             ),
           },
-          { text: ' moved now.' },
+          { text: ' units: ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:move_us',
+              'Units for Union Square',
+              strictToUnion,
+              strictToUnion.toLocaleString('en-US'),
+              'Best-sellers units moved to Union Square from giving stores.',
+            ),
+          },
+          { text: ' to Union Square, ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:move_pa',
+              'Units for Palo Alto',
+              strictToPalo,
+              strictToPalo.toLocaleString('en-US'),
+              'Best-sellers units moved to Palo Alto from giving stores.',
+            ),
+          },
+          { text: ' to Palo Alto, ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c1:move_sr',
+              'Units for Santana Row',
+              strictToSantana,
+              strictToSantana.toLocaleString('en-US'),
+              'Best-sellers units moved to Santana Row from giving stores.',
+            ),
+          },
+          { text: ' to Santana Row. Result: nothing lost.' },
         ],
       },
     ],
@@ -657,14 +926,69 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
       min: 0,
       max: 28,
       step: 1,
-      defaultValue: 14,
+      defaultValue: 7,
       unitSingular: 'day',
       unitPlural: 'days',
-      label: 'Days after shelves run empty (starting 21 Sep) before you approve a full move',
-      helperText: 'Slide to see how much waiting costs once Union Square, Palo Alto, and Santana Row start running out.',
+      label: 'Days after shelves run empty (starting 21 September) before you approve a full move',
+      helperText:
+        'Slide to see how much waiting costs once Union Square, Palo Alto, and Santana Row start running out.',
+      aboveSliderLines: [
+        {
+          id: 'c1-slider-above',
+          parts: [
+            {
+              text: `Nothing in the reports looks wrong until a shelf is empty. The first empty shelf is ${formatLongDate(unionFirstEmpty)}. On that day the headline still says all stores are up `,
+            },
+            {
+              fact: makeCustomCountFact(
+                'judge:c1:sep21_ly',
+                'All stores vs last year on 21 Sep',
+                sep21LyPct,
+                String(sep21LyPct),
+                'All-store sales over the 28 days ending 21 September vs prior year, buoyed by Burlingame and Napa openings.',
+              ),
+            },
+            { text: '% on last year, because two new stores opened.' },
+          ],
+        },
+      ],
+      belowSliderLines: [
+        {
+          id: 'c1-slider-below-1',
+          parts: [
+            { text: 'Each extra day costs about ' },
+            {
+              fact: createFact(
+                'judge:c1:extra_day_cost',
+                'Cost of each extra day waiting',
+                extraDayAvgUsd,
+                'USD',
+                'Average additional lost Best-sellers sales per extra day of waiting between 0 and 28 days after 21 September.',
+              ),
+            },
+            { text: '.' },
+          ],
+        },
+        {
+          id: 'c1-slider-below-2',
+          parts: [
+            { text: 'Even an answer on the same day loses ' },
+            {
+              fact: createFact(
+                'judge:c1:same_day_loss',
+                'Loss even with same-day answer',
+                sliderDay0Eval.lossUsd,
+                'USD',
+                'Sales lost while the transfer is in transit for two days after approving on 21 September.',
+              ),
+            },
+            { text: ', because stock takes two days to travel.' },
+          ],
+        },
+      ],
     },
     opscienSummary:
-      `Opscien noticed the shortage on ${formatShortDate(sep8Date)}, moved ${opscienPlanSep8.totalUnitsFact.formatted} to Union Square and Palo Alto, and held Santana Row back to prove it worked. Once proven on 27 Sep, it sent ${opsRolloutPlan.totalUnitsFact.formatted} to Santana Row. No extra stock was bought.`,
+      `Opscien raised this on 8 September, ${daysToFirstEmpty} days before the first empty shelf. It moved ${opscienPlanSep8.totalUnitsFact.formatted} to Union Square and Palo Alto, and held Santana Row back to prove it worked. Once proven on 27 September, it sent ${opsRolloutPlan.totalUnitsFact.formatted} to Santana Row. No extra stock was bought.`,
     opscienCostFact: createFact(
       'judge:ops:c1_cost',
       'Opscien Case 1 lost sales',
@@ -757,11 +1081,14 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
       },
     ],
     promptQuestion: 'What would you do on Monday morning?',
+    optionsFootnote:
+      'This simulation has no price response. A real discount would also bring some extra sales. We count only the discount on sales that happened without it.',
     options: [
       {
         id: 'a',
         label: 'Run a 20% sale all week (10 Aug – 16 Aug)',
         detail: 'Cut shelf prices by 20% across all stores for seven days to pull shoppers back.',
+        costLabel: 'Discount given on sales that were coming anyway',
         lossUsd: c2OptACost,
         lossFact: createFact(
           'judge:c2:opt_a:cost',
@@ -785,6 +1112,7 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
         id: 'b',
         label: 'Run a 20% sale for the weekend (14 Aug – 16 Aug)',
         detail: 'Offer 20% off from Friday to Sunday only.',
+        costLabel: 'Discount given on sales that were coming anyway',
         lossUsd: c2OptBCost,
         lossFact: createFact(
           'judge:c2:opt_b:cost',
@@ -895,7 +1223,7 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
     hasDelaySlider: false,
     noSliderExplanation:
       'Speed is not the risk here. Raising a false alarm wastes money on a price cut even if you act that same morning — whereas checking properly shows there is nothing to fix.',
-    opscienSummary: `Opscien noticed the August dip, checked the trading calendar against prior-year August, and kept quiet. Over the full 106 days it checked ${workCounts.signalsChecked.toLocaleString('en-US')} signals and kept ${workCounts.stayedQuiet} normal swings quiet — waking you zero times for false alarms.`,
+    opscienSummary: `Opscien noticed the August dip, checked the trading calendar against prior-year August, and kept quiet. Over the full 106 days it checked ${workCounts.signalsChecked.toLocaleString('en-US')} signals and stayed quiet on ${workCounts.stayedQuiet}.`,
     opscienCostFact: createFact(
       'judge:ops:c2_cost',
       'Opscien Case 2 lost margin',
@@ -929,23 +1257,46 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
     sim0,
     sep30Date,
   );
-  const storeRateFact = rbTool.facts.find((f) => f.id.includes('store_rate'))!;
-  const otherRateFact = rbTool.facts.find((f) => f.id.includes('other_rate'))!;
   const op14UsdSep30Fact = rbTool.facts.find((f) => f.id.includes('op14_usd'))!;
   const op14CountSep30Fact = rbTool.facts.find((f) => f.id.includes('op14_count'))!;
 
-  // 14d rate 17 Sep..30 Sep
-  const sep17_30RefundUsd = sim0.walnutCreekRefunds
-    .filter((r) => r.date >= '2026-09-17' && r.date <= sep30Date)
-    .reduce((s, r) => s + r.amount, 0);
-  const sep17_30Sales = sim0.dates
-    .filter((d) => d >= '2026-09-17' && d <= sep30Date)
-    .reduce((s, d) => s + sim0.storeRecordsByDate[d].walnut_creek.actualSales, 0);
-  const last14RatePct = sep17_30Sales > 0 ? (sep17_30RefundUsd / sep17_30Sales) * 100 : 0;
+  // Step 1 rates: August all stores vs 15..30 Sep all stores, Walnut Creek, and other 9 stores
+  let augAllSales = 0;
+  let augAllRefunds = 0;
+  let sep15_30AllSales = 0;
+  let sep15_30AllRefunds = 0;
+  let sep15_30WcSales = 0;
+  let sep15_30WcRefunds = 0;
+  let sep15_30OtherSales = 0;
+  let sep15_30OtherRefunds = 0;
+  for (const d of sim0.liveDates) {
+    for (const st of STORES) {
+      const r = sim0.storeRecordsByDate[d]?.[st.id];
+      if (!r?.isOpen) continue;
+      if (d >= '2026-08-01' && d <= '2026-08-31') {
+        augAllSales += r.actualSales;
+        augAllRefunds += r.refundAmount;
+      }
+      if (d >= '2026-09-15' && d <= sep30Date) {
+        sep15_30AllSales += r.actualSales;
+        sep15_30AllRefunds += r.refundAmount;
+        if (st.id === 'walnut_creek') {
+          sep15_30WcSales += r.actualSales;
+          sep15_30WcRefunds += r.refundAmount;
+        } else {
+          sep15_30OtherSales += r.actualSales;
+          sep15_30OtherRefunds += r.refundAmount;
+        }
+      }
+    }
+  }
+  const allAugRatePct = augAllSales > 0 ? (augAllRefunds / augAllSales) * 100 : 0;
+  const allSep15_30RatePct = sep15_30AllSales > 0 ? (sep15_30AllRefunds / sep15_30AllSales) * 100 : 0;
+  const wcSep15_30RatePct = sep15_30WcSales > 0 ? (sep15_30WcRefunds / sep15_30WcSales) * 100 : 0;
+  const otherSep15_30RatePct = sep15_30OtherSales > 0 ? (sep15_30OtherRefunds / sep15_30OtherSales) * 100 : 0;
 
-  // All live-window unlinked refunds with no switch vs with switch on Sep 30
-  const unlinkedAll = sumUnlinkedCashRefunds(sim0, LIVE_START_DATE, LIVE_END_DATE);
-  const unlinkedSep30 = sumUnlinkedCashRefunds(sim0, LIVE_START_DATE, sep30Date);
+  // All 15 Sep .. 14 Nov refunds (false vs honest)
+  const unlinkedAll = sumUnlinkedCashRefunds(sim0, '2026-09-15', LIVE_END_DATE);
   const simWithSwitchSep30 = runSimulation(
     seed,
     [{ id: 'judge:c3:sw', candidateId: 'situation:refunds_out_of_line:walnut_creek', date: sep30Date, kind: 'refund_switch' }],
@@ -957,6 +1308,33 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
     LIVE_END_DATE,
   );
 
+  const sep15ToNov14Weeks = (diffDays('2026-09-15', LIVE_END_DATE) + 1) / 7;
+  const unlinkedWeeklyUsd = Math.round(unlinkedAll.lossUsd / sep15ToNov14Weeks);
+  const unlinkedAnnualUsd = Math.round(((unlinkedAll.lossUsd / sep15ToNov14Weeks) * 52) / 1000) * 1000;
+
+  let chainCash15SepTo14Nov = 0;
+  for (const d of sim0.liveDates) {
+    if (d < '2026-09-15' || d > LIVE_END_DATE) continue;
+    for (const st of STORES) {
+      const r = sim0.storeRecordsByDate[d]?.[st.id];
+      if (r?.isOpen) chainCash15SepTo14Nov += r.cashRefundAmount;
+    }
+  }
+  const chainHonestCashWeeklyUsd = Math.round(
+    (chainCash15SepTo14Nov - unlinkedAll.lossUsd) / sep15ToNov14Weeks,
+  );
+
+  const honestWcRows = sim0.walnutCreekRefunds.filter(
+    (r) => r.date >= '2026-09-15' && r.date <= LIVE_END_DATE && r.linkedOrder,
+  );
+  const honestWcCount = honestWcRows.length;
+  const honestWcAvgUsd =
+    honestWcCount > 0
+      ? Math.round(honestWcRows.reduce((s, r) => s + r.amount, 0) / honestWcCount)
+      : 0;
+  const honestWcOver50Count = honestWcRows.filter((r) => r.amount > 50).length;
+  const honestWcOver50PerWeek = Math.round(honestWcOver50Count / sep15ToNov14Weeks);
+
   const sampleUnlinked = sim0.walnutCreekRefunds
     .filter((r) => r.date <= sep30Date && !r.linkedOrder)
     .slice(-3);
@@ -964,95 +1342,164 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
     .filter((r) => r.date <= sep30Date && r.linkedOrder)
     .slice(-1);
 
+  const case3SlipRows: JudgeTableRow[] = [
+    ...sampleUnlinked.map((r) => ({
+      store: `${formatShortDate(r.date)} · ${format12HourTime(r.time)}`,
+      col1: `Cash · Till ${r.till} (Staff ${r.operatorNumber})`,
+      col2: 'None on file',
+      col3: `$${Math.round(r.amount)}`,
+    })),
+    ...sampleLinked.map((r) => ({
+      store: `${formatShortDate(r.date)} · ${format12HourTime(r.time)}`,
+      col1: `${r.method === 'card' ? 'Card' : 'Cash'} · Till ${r.till} (Staff ${r.operatorNumber})`,
+      col2: 'Linked sale receipt',
+      col3: `$${Math.round(r.amount)}`,
+    })),
+  ];
+
   const case3Spec: JudgeCaseSpec = {
     caseNumber: 3,
     date: sep30Date,
-    dateFormatted: formatShortDate(sep30Date),
-    title: 'Cash refunds spiked at Walnut Creek',
-    whatYouSeeLead: `Walnut Creek’s refund rate over the last 28 days reached ${storeRateFact.formatted}, more than twice the ${otherRateFact.formatted} median at your other stores open more than 18 months. Below are four recent refund slips from the till.`,
-    whatYouSeeColumns: ['Date & time', 'Method & till', 'Matching order', 'Amount'],
-    whatYouSeeRows: [
-      ...sampleUnlinked.map((r) => ({
-        store: `${formatShortDate(r.date)} · ${r.time}`,
-        col1: `Cash · Till ${r.till} (Staff ${r.operatorNumber})`,
-        col2: 'None on file',
-        col3: `$${Math.round(r.amount)}`,
-      })),
-      ...sampleLinked.map((r) => ({
-        store: `${formatShortDate(r.date)} · ${r.time}`,
-        col1: `${r.method === 'card' ? 'Card' : 'Cash'} · Till ${r.till} (Staff ${r.operatorNumber})`,
-        col2: 'Linked sale receipt',
-        col3: `$${Math.round(r.amount)}`,
-      })),
+    dateFormatted: formatLongDate(sep30Date),
+    title: 'The leak nobody was looking for',
+    whatYouSeeLines: [
+      {
+        id: 'c3-see-1',
+        parts: [
+          { text: 'Refunds across all stores are ' },
+          {
+            fact: createFact(
+              'judge:c3:see:all_sep',
+              'All-store refund rate (15–30 Sep)',
+              allSep15_30RatePct,
+              'share_percent',
+              'Total refunds divided by total sales across all open stores from 15 Sep to 30 Sep.',
+            ),
+          },
+          { text: ' of sales. In August they were ' },
+          {
+            fact: createFact(
+              'judge:c3:see:all_aug',
+              'All-store refund rate in August',
+              allAugRatePct,
+              'share_percent',
+              'Total refunds divided by total sales across all open stores from 1 Aug to 31 Aug.',
+            ),
+          },
+          { text: '.' },
+        ],
+      },
+      {
+        id: 'c3-see-2',
+        parts: [
+          { text: 'By store: Walnut Creek ' },
+          {
+            fact: createFact(
+              'judge:c3:see:wc',
+              'Walnut Creek refund rate (15–30 Sep)',
+              wcSep15_30RatePct,
+              'share_percent',
+              'Walnut Creek refunds divided by sales from 15 Sep to 30 Sep.',
+            ),
+          },
+          { text: '. The other nine stores ' },
+          {
+            fact: createFact(
+              'judge:c3:see:other9',
+              'Other nine stores refund rate (15–30 Sep)',
+              otherSep15_30RatePct,
+              'share_percent',
+              'Combined refunds divided by combined sales at the other nine stores from 15 Sep to 30 Sep.',
+            ),
+          },
+          { text: '.' },
+        ],
+      },
     ],
+    whatYouSeeColumns: [],
+    whatYouSeeRows: [],
     promptQuestion: 'What would you do this morning?',
     options: [
       {
         id: 'a',
-        label: 'Leave it until the month-end review',
-        detail: 'Make no till changes now and inspect refund totals at the end of next month.',
+        label: 'Leave it.',
+        detail: 'Refunds are a cost of doing business.',
         lossUsd: unlinkedAll.lossUsd,
         lossFact: createFact(
           'judge:c3:opt_a:loss',
           'Case 3 Option A unlinked cash refunds',
           unlinkedAll.lossUsd,
           'USD',
-          `${unlinkedAll.count} unlinked cash refunds at Walnut Creek from 1 Aug through 14 Nov.`,
+          `${unlinkedAll.count} unlinked cash refunds at Walnut Creek from 15 Sep through 14 Nov.`,
         ),
-        resultSummary: `Without a rule change, ${unlinkedAll.count} unlinked late-evening cash refunds pass through the till by 14 Nov.`,
+        resultSummary: `$${unlinkedAll.lossUsd.toLocaleString('en-US')} by 14 November ($${unlinkedWeeklyUsd.toLocaleString('en-US')} a week on average), about $${unlinkedAnnualUsd.toLocaleString('en-US')} a year at that rate.`,
         resultFacts: [
           createFact(
-            'judge:c3:opt_a:cnt',
-            'Total unlinked cash refunds',
-            unlinkedAll.count,
-            'count',
-            'Total cash refunds after 8 pm with no matching order through 14 Nov.',
+            'judge:c3:opt_a:weekly',
+            'Average per week',
+            unlinkedWeeklyUsd,
+            'USD',
+            'Average weekly unlinked cash refunds from 15 Sep through 14 Nov.',
+          ),
+          createFact(
+            'judge:c3:opt_a:annual',
+            'Annualized rate',
+            unlinkedAnnualUsd,
+            'USD',
+            'Weekly average multiplied by 52 weeks, rounded to nearest thousand.',
           ),
         ],
       },
       {
         id: 'b',
-        label: 'Turn on manager approval over $50 today',
-        detail: 'Require a manager PIN on any cash refund above $50 with no linked order starting 30 Sep.',
+        label: 'Stop cash refunds in all ten stores.',
+        detail: 'Close the door completely.',
         lossUsd: unlinkedIfSwitchSep30.lossUsd,
         lossFact: createFact(
           'judge:c3:opt_b:loss',
           'Case 3 Option B lost before switch',
           unlinkedIfSwitchSep30.lossUsd,
           'USD',
-          'Cash refunds lost before 30 Sep; future unlinked cash refunds over $50 stop immediately.',
+          'Unlinked cash refunds lost before 30 Sep; future cash refunds stopped completely across all 10 stores.',
         ),
-        resultSummary: `Stops the loss right away on 30 Sep, saving $${(unlinkedAll.lossUsd - unlinkedIfSwitchSep30.lossUsd).toLocaleString('en-US')} between 30 Sep and 14 Nov.`,
+        resultSummary: `Honest customers are refused about $${chainHonestCashWeeklyUsd.toLocaleString('en-US')} of cash refunds a week across the chain.`,
         resultFacts: [
           createFact(
-            'judge:c3:opt_b:saved',
-            'Saved after 30 Sep',
-            unlinkedAll.lossUsd - unlinkedIfSwitchSep30.lossUsd,
+            'judge:c3:opt_b:honest_cash_wk',
+            'Honest cash refunds refused per week',
+            chainHonestCashWeeklyUsd,
             'USD',
-            'Future unlinked cash refunds prevented from 30 Sep through 14 Nov.',
+            'All cash refunds across all open stores from 15 Sep to 14 Nov minus false refunds, averaged per week.',
           ),
         ],
       },
       {
         id: 'c',
-        label: 'Turn on the $50 rule and add a daily review screen',
-        detail: 'Block unlinked cash refunds over $50 without manager approval and give Walnut Creek a daily exception list.',
+        label: 'Every refund over $50 needs the manager.',
+        detail: 'Put a check on all of them.',
         lossUsd: unlinkedIfSwitchSep30.lossUsd,
         lossFact: createFact(
           'judge:c3:opt_c:loss',
           'Case 3 Option C lost before switch',
           unlinkedIfSwitchSep30.lossUsd,
           'USD',
-          'Cash refunds lost before 30 Sep; all future unlinked cash refunds over $50 stop immediately.',
+          'Unlinked cash refunds lost before 30 Sep; future refunds over $50 require manager approval.',
         ),
-        resultSummary: `Same $${unlinkedIfSwitchSep30.lossUsd.toLocaleString('en-US')} total prior loss — and the daily exception list flags repeat receipts right away.`,
+        resultSummary: `At Walnut Creek alone the manager is called for ${honestWcOver50Count} honest refunds in two months, about ${honestWcOver50PerWeek} a week.`,
         resultFacts: [
-          createFact(
-            'judge:c3:opt_c:saved',
-            'Saved after 30 Sep',
-            unlinkedAll.lossUsd - unlinkedIfSwitchSep30.lossUsd,
-            'USD',
-            'Future unlinked cash refunds prevented from 30 Sep through 14 Nov.',
+          makeCustomCountFact(
+            'judge:c3:opt_c:honest_over50',
+            'Honest refunds stopped for check',
+            honestWcOver50Count,
+            String(honestWcOver50Count),
+            'Linked normal Walnut Creek refunds over $50 between 15 Sep and 14 Nov.',
+          ),
+          makeCustomCountFact(
+            'judge:c3:opt_c:per_week',
+            'Manager checks per week',
+            honestWcOver50PerWeek,
+            String(honestWcOver50PerWeek),
+            'Weekly average of honest Walnut Creek refunds over $50 requiring manager override.',
           ),
         ],
       },
@@ -1061,58 +1508,144 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
       {
         id: 'c3-num-1',
         parts: [
-          { text: 'Walnut Creek’s 28-day refund rate reached ' },
-          { fact: storeRateFact },
-          { text: ' vs ' },
-          { fact: otherRateFact },
-          { text: ' at other stores open more than 18 months — rising to ' },
+          { text: 'There are ' },
           {
-            fact: createFact(
-              'judge:c3:14d_rate',
-              'Last 14 days refund rate',
-              last14RatePct,
-              'percent',
-              'Walnut Creek refunds divided by sales over 17 Sep – 30 Sep.',
+            fact: makeCustomCountFact(
+              'judge:c3:false_count',
+              'False refunds',
+              unlinkedAll.count,
+              String(unlinkedAll.count),
+              'Unlinked cash refunds at Walnut Creek from 15 September through 14 November.',
             ),
           },
-          { text: ' in the last 14 days.' },
-        ],
-      },
-      {
-        id: 'c3-num-2',
-        parts: [
-          { text: `Every unlinked cash refund came from Till 2, operator 14, between ${unlinkedSep30.minTime} and ${unlinkedSep30.maxTime}, for ` },
+          { text: ' false refunds. All of them share five facts: cash, no order attached, till ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:till',
+              'Till number',
+              2,
+              '2',
+              'Every unlinked cash refund occurred on Till 2 at Walnut Creek.',
+            ),
+          },
+          { text: ', operator ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:op',
+              'Operator number',
+              14,
+              '14',
+              'Every unlinked cash refund was processed under operator 14.',
+            ),
+          },
+          {
+            text: `, between ${format12HourTime(unlinkedAll.minTime)} and ${format12HourTime(unlinkedAll.maxTime)}. Each is between `,
+          },
           {
             fact: createFact(
               'judge:c3:amt_min',
               'Smallest unlinked cash refund',
-              unlinkedSep30.minAmt,
+              unlinkedAll.minAmt,
               'USD',
-              'Smallest unlinked late-evening cash refund at Walnut Creek through 30 Sep.',
+              'Smallest unlinked cash refund at Walnut Creek across 15 September – 14 November.',
             ),
           },
-          { text: ' to ' },
+          { text: ' and ' },
           {
             fact: createFact(
               'judge:c3:amt_max',
               'Largest unlinked cash refund',
-              unlinkedSep30.maxAmt,
+              unlinkedAll.maxAmt,
               'USD',
-              'Largest unlinked late-evening cash refund at Walnut Creek through 30 Sep.',
+              'Largest unlinked cash refund at Walnut Creek across 15 September – 14 November.',
             ),
           },
-          { text: ' each.' },
+          { text: '.' },
+        ],
+        table: {
+          columns: ['Date & time', 'Method & till', 'Matching order', 'Amount'],
+          rows: case3SlipRows,
+        },
+      },
+      {
+        id: 'c3-num-2',
+        parts: [
+          { text: 'Honest refunds at the same store in the same weeks: ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:honest_cnt',
+              'Honest refunds at Walnut Creek',
+              honestWcCount,
+              String(honestWcCount),
+              'Linked normal refunds at Walnut Creek from 15 September through 14 November.',
+            ),
+          },
+          { text: ', average ' },
+          {
+            fact: createFact(
+              'judge:c3:honest_avg',
+              'Average honest refund',
+              honestWcAvgUsd,
+              'USD',
+              'Mean dollar amount of linked normal refunds at Walnut Creek across 15 September – 14 November.',
+            ),
+          },
+          { text: ', every one attached to an order.' },
         ],
       },
       {
         id: 'c3-num-3',
         parts: [
-          { text: 'By 30 Sep, ' },
-          { fact: op14CountSep30Fact },
-          { text: ' of those receipts totaled ' },
-          { fact: op14UsdSep30Fact },
           {
-            text: `. Across the full season without a switch, ${unlinkedAll.count} receipts total $${unlinkedAll.lossUsd.toLocaleString('en-US')}.`,
+            text: 'The narrow rule: a cash refund over $50 with no order attached needs the manager. It stops ',
+          },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:narrow_false',
+              'False refunds stopped',
+              unlinkedAll.count,
+              String(unlinkedAll.count),
+              'All unlinked cash refunds over $50 are blocked without manager approval.',
+            ),
+          },
+          { text: ' of ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:narrow_false_tot',
+              'Total false refunds',
+              unlinkedAll.count,
+              String(unlinkedAll.count),
+              'Total false unlinked cash refunds across 15 September – 14 November.',
+            ),
+          },
+          { text: ' false refunds and ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:narrow_honest',
+              'Honest refunds interrupted',
+              0,
+              '0',
+              'Every honest refund has a matching order attached, so zero honest refunds are interrupted.',
+            ),
+          },
+          { text: ' of ' },
+          {
+            fact: makeCustomCountFact(
+              'judge:c3:narrow_honest_tot',
+              'Total honest refunds',
+              honestWcCount,
+              String(honestWcCount),
+              'Total honest order-linked refunds at Walnut Creek across 15 September – 14 November.',
+            ),
+          },
+          { text: ' honest ones.' },
+        ],
+      },
+      {
+        id: 'c3-num-4',
+        parts: [
+          {
+            text: 'The till has no screen for that rule. Somebody has to build one. Opscien built the Refund exceptions desk the same day.',
           },
         ],
       },
@@ -1125,11 +1658,12 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
       defaultValue: 2,
       unitSingular: 'week',
       unitPlural: 'weeks',
-      label: 'Weeks before you turn on the $50 manager approval rule (after 30 Sep)',
-      helperText: 'Slide to see how fast unlinked late-evening cash refunds pile up while a question waits in a queue.',
+      label: 'Weeks before you turn on the $50 manager approval rule (after 30 September)',
+      helperText:
+        'Slide to see how fast unlinked late-evening cash refunds pile up while a question waits in a queue.',
     },
     opscienSummary:
-      'Opscien caught the spike without anyone asking, checked receipts by till, hour, and staff number, built and tested the Walnut Creek refund desk three times, and asked you to flip the $50 approval switch on 30 Sep.',
+      `The refunds began on 15 September. Opscien needed 15 days of evidence. On 30 September it named the pattern, built the tool, and the loss stopped at $${unlinkedIfSwitchSep30.lossUsd.toLocaleString('en-US')}.`,
     opscienCostFact: createFact(
       'judge:ops:c3_cost',
       'Opscien Case 3 lost before 30 Sep rule',
@@ -1255,10 +1789,10 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
   const case4Spec: JudgeCaseSpec = {
     caseNumber: 4,
     date: sep27Date,
-    dateFormatted: formatShortDate(sep27Date),
+    dateFormatted: formatLongDate(sep27Date),
     title: 'Did the Best-sellers transfer cause the sales jump?',
     whatYouSeeLead:
-      'Two weeks after the 8 Sep stock arrival (10 Sep – 23 Sep), sales jumped at the stores that got stock — and at healthy stores that already had plenty of stock.',
+      'Two weeks after the 8 September stock arrival (10 September – 23 September), sales rose at Union Square and Palo Alto.',
     whatYouSeeColumns: ['Store pair', '25 Aug – 7 Sep', '10 Sep – 23 Sep', 'Change'],
     whatYouSeeRows: [
       {
@@ -1266,18 +1800,6 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
         col1: `$${treatedBefore.toLocaleString('en-US')}`,
         col2: `$${treatedAfter.toLocaleString('en-US')}`,
         col3: `+${treatedJumpPct.toFixed(1)}%`,
-      },
-      {
-        store: 'Walnut Creek & Pasadena (already stocked)',
-        col1: `$${healthyBefore.toLocaleString('en-US')}`,
-        col2: `$${healthyAfter.toLocaleString('en-US')}`,
-        col3: `+${healthyJumpPct.toFixed(1)}%`,
-      },
-      {
-        store: 'Santana Row (21 Sep – 27 Sep, held back)',
-        col1: `$${Math.round(srSep21_27.exp).toLocaleString('en-US')} expected`,
-        col2: `$${Math.round(srSep21_27.act).toLocaleString('en-US')} actual`,
-        col3: `${santanaDropPct.toFixed(1)}%`,
       },
     ],
     promptQuestion: `Does the +${treatedJumpPct.toFixed(1)}% sales rise prove the transfer caused the jump?`,
@@ -1342,6 +1864,23 @@ export function getJudgeScenarioBundle(seed: number = DEFAULT_SEED): JudgeScenar
             text: `Union Square and Palo Alto jumped +${treatedJumpPct.toFixed(1)}% ($${treatedBefore.toLocaleString('en-US')} to $${treatedAfter.toLocaleString('en-US')}), while already-stocked Walnut Creek and Pasadena jumped +${healthyJumpPct.toFixed(1)}% ($${healthyBefore.toLocaleString('en-US')} to $${healthyAfter.toLocaleString('en-US')}).`,
           },
         ],
+        table: {
+          columns: ['Store pair', '25 Aug – 7 Sep', '10 Sep – 23 Sep', 'Change'],
+          rows: [
+            {
+              store: 'Walnut Creek & Pasadena (already stocked)',
+              col1: `$${healthyBefore.toLocaleString('en-US')}`,
+              col2: `$${healthyAfter.toLocaleString('en-US')}`,
+              col3: `+${healthyJumpPct.toFixed(1)}%`,
+            },
+            {
+              store: 'Santana Row (21 Sep – 27 Sep, held back)',
+              col1: `$${Math.round(srSep21_27.exp).toLocaleString('en-US')} expected`,
+              col2: `$${Math.round(srSep21_27.act).toLocaleString('en-US')} actual`,
+              col3: `${santanaDropPct.toFixed(1)}%`,
+            },
+          ],
+        },
       },
       {
         id: 'c4-num-2',

@@ -58,7 +58,7 @@ function StockMiniBar({
   const low = weeks < 2.5;
 
   return (
-    <div className="space-y-0.5 text-[10px]">
+    <div className="space-y-0.5 text-[10px] leading-tight">
       <div className="flex items-center justify-between gap-1">
         <span className="text-[#56695D] truncate">{label}</span>
         <span
@@ -68,7 +68,7 @@ function StockMiniBar({
           <FactValue fact={fact} onInspect={onInspectFact} noPlus plainFont />
         </span>
       </div>
-      <div className="relative h-1.5 rounded-full bg-[#EFE8D6] overflow-hidden">
+      <div className="relative h-1 rounded-full bg-[#EFE8D6] overflow-hidden">
         <div
           className={`h-full rounded-full transition-all ${
             low ? 'bg-[#DC2626]' : 'bg-[#25372C]'
@@ -92,7 +92,7 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
 
   return (
     <>
-      <aside aria-labelledby="store-board-heading" className="space-y-1.5">
+      <aside aria-labelledby="store-board-heading" className="space-y-1">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 id="store-board-heading" className="text-sm font-semibold text-[#25372C]">
             All 10 stores
@@ -110,9 +110,9 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
             <li
               key={store.storeId}
               onClick={() => setSelectedStoreId(store.storeId)}
-              className="bg-white hover:bg-[#FFFDF7] border border-[#E5DCC7] rounded-xl p-2 space-y-1 transition-colors cursor-pointer shadow-2xs"
+              className="bg-white hover:bg-[#FFFDF7] border border-[#E5DCC7] rounded-xl px-2 py-1.5 space-y-0.5 transition-colors cursor-pointer shadow-2xs"
             >
-              <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center justify-between gap-1.5 leading-tight">
                 <button
                   type="button"
                   onClick={(e) => {
@@ -125,7 +125,7 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
                 </button>
                 <span
                   title={store.statusLabel}
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 ${statusStyles(
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium border shrink-0 leading-none ${statusStyles(
                     store.status,
                   )}`}
                 >
@@ -133,7 +133,7 @@ export function StoreBoard({ stores, asOfDate, onInspectFact }: StoreBoardProps)
                 </span>
               </div>
 
-              <div className="space-y-1">
+              <div className="space-y-0.5">
                 <StockMiniBar
                   label="Best-sellers"
                   fact={store.bestSellersCoverFact}
